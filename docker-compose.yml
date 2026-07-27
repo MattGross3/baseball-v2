@@ -1,0 +1,32 @@
+# Phase 0 runs no application containers - only Postgres, for local dev and
+# for the test suite. The constraints this schema relies on (CHECK, TIMESTAMPTZ
+# semantics, partial indexes, NULLs in btree) are Postgres behaviours, so
+# testing against SQLite would prove nothing about production.
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: baseball
+      POSTGRES_PASSWORD: baseball
+      POSTGRES_DB: baseball
+    ports:
+      # 5433 on the host, NOT 5432. A native PostgreSQL 18 install already
+      # listens on 5432 and holds the v1 project's live database (games,
+      # predictions, model_registry, ...). Binding there too is silently
+      # ambiguous - both processes accept the bind, and host connections
+      # reach whichever won the race - so this project would intermittently
+      # run its migrations against v1's real data. Keep them separated.
+      - "5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # `pg_isready` returns success as soon as the postmaster accepts
+      # connections, which is earlier than "the database is usable" - fine
+      # here because migrations run separately, not as a compose dependency.
+      test: ["CMD-SHELL", "pg_isready -U baseball -d baseball"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  pgdata:

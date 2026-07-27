@@ -1,0 +1,13 @@
+# Normalise line endings. Development happens on Windows, but the code runs
+# in Linux containers, so anything the container executes or parses must be
+# LF regardless of what the working copy looks like. Without this, a shell
+# script or a .env copied straight from a CRLF checkout fails inside the
+# container with errors that name the wrong thing entirely.
+* text=auto eol=lf
+
+# Binary-ish or generated files git should not try to diff or normalise.
+*.png binary
+*.jpg binary
+*.ico binary
+*.pkl binary
+*.parquet binary

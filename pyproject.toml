@@ -1,0 +1,51 @@
+[project]
+name = "baseball-v2"
+version = "0.1.0"
+description = "Betting analytics: persistence layer and CLV measurement loop"
+# claude.md specifies Python 3.12. Expressed as a floor rather than a pin
+# because 3.12 is not installed on this machine (3.13.7 and 3.14.3 are) and
+# nothing here uses a version-specific feature newer than StrEnum (3.11).
+requires-python = ">=3.12"
+
+dependencies = [
+    "sqlalchemy>=2.0.51",
+    "alembic>=1.18",
+    # psycopg3, not psycopg2: one driver serves both the async app and
+    # Alembic's sync migration runner. asyncpg is faster but async-only,
+    # which would mean a second driver and a second URL to keep in sync.
+    "psycopg[binary]>=3.2",
+    "pydantic>=2.13",
+    "pydantic-settings>=2.14",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.4",
+    "pytest-asyncio>=1.0",
+    "pytest-cov>=6.0",
+]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+# `database.migrations` is deliberately absent: Alembic locates it by
+# filesystem path via `script_location`, never by import.
+packages = ["betting", "database"]
+py-modules = ["config"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+# Async fixtures live for the whole session (one Postgres engine, one
+# schema creation) rather than being torn down per test.
+asyncio_default_fixture_loop_scope = "session"
+markers = [
+    "postgres: requires a live Postgres 16 (docker compose up -d postgres)",
+]
+filterwarnings = ["error::DeprecationWarning"]
+
+[tool.coverage.run]
+branch = true
+source = ["betting", "database"]
