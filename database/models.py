@@ -158,47 +158,67 @@ class OddsSnapshot(Base):
         CheckConstraint(_LINE_PRESENCE, name="line_presence"),
         CheckConstraint(_SELECTION_MATCHES_MARKET, name="selection_matches_market"),
         CheckConstraint("game_pk > 0", name="game_pk_positive"),
-        # THE point-in-time index: four equality columns, then captured_at,
-        # so "captured_at < T ORDER BY captured_at DESC LIMIT 1" is answered
-        # by an ordered backward walk that stops at the first row - O(log n)
-        # plus a tuple, and it stays that way as the table grows without
-        # bound, which it will, since nothing is ever deleted.
+        # THE point-in-time lookup, split into two PARTIAL indexes on whether
+        # the market carries a line. Both answer "captured_at < T ORDER BY
+        # captured_at DESC, id DESC LIMIT 1" with an ordered backward walk
+        # that stops at the first row.
         #
-        # `line` is DELIBERATELY NOT IN THIS INDEX, and that is not an
-        # oversight. A btree yields ordered output on a trailing column only
-        # when every preceding column is bound by EQUALITY. `line IS NULL` -
-        # which is every moneyline row, the most common market - is a valid
-        # scan key but is not an equality for pathkey purposes, so including
-        # `line` ahead of `captured_at` silently destroys the ordering
-        # guarantee: Postgres falls back to reading every matching row and
-        # sorting them. Measured on 400k rows, that turned a 0.04ms ordered
-        # scan into a bitmap scan plus a top-N sort at ~13x the estimated
-        # cost. With `line` left out, it is instead a cheap filter, and the
-        # ordering holds for moneyline and totals alike.
+        # Why two, rather than one index containing `line`:
         #
-        # The cost of that filter is walking past snapshots of other lines
-        # for the same game/market/selection/book. A total that moved across
-        # four lines in a day still resolves in under 0.1ms. If alternate
-        # lines ever land (20+ per market), revisit with a partial index
-        # per line-presence case.
+        # A btree yields ordered output on a trailing column only when every
+        # preceding column is bound by EQUALITY. `line IS NULL` is a NullTest,
+        # not an equality operator, so it never forms an equivalence class
+        # with a constant and the planner cannot drop the `line` pathkey. The
+        # rows ARE physically ordered by captured_at within the NULL-line
+        # range; the planner just cannot prove it, so it sorts. Measured on
+        # 400k rows: a single index with `line` in it turned a 0.04ms ordered
+        # scan into a bitmap scan plus top-N sort at ~13x the estimated cost
+        # (289.99 vs 8.47).
         #
-        # `id` trails captured_at because the query breaks ties on it, so
-        # that two prices stamped at the identical instant (a poll writing a
-        # row twice) resolve the same way on every call. Without it in the
-        # index the ORDER BY is only partly satisfied and Postgres bolts on
-        # an Incremental Sort - cheap, but no longer "stop at the first row".
+        # Simply dropping `line` fixes the ordering but makes a lined lookup
+        # scan every row for that game/market/selection/book across ALL lines
+        # and filter. Four totals lines is nothing; a strikeout prop with 15
+        # alternate lines polled every 15 minutes for six hours is 360 rows
+        # scanned to return one.
+        #
+        # Partial indexes get both properties. In the unlined index the
+        # predicate absorbs `line IS NULL`, so `line` is not a column at all
+        # and every leading column is an equality. In the lined index
+        # `line = $5` is a genuine equality, so ordering holds AND the scan
+        # narrows to the one line instead of filtering siblings.
+        #
+        # This only works if the query emits `line IS NULL` or `line = $5`
+        # to match a predicate - see betting/clv.py::find_closing_snapshot.
+        # `IS NOT DISTINCT FROM` matches neither and is not indexable at all.
+        #
+        # `id` trails captured_at because the query breaks ties on it, so two
+        # prices stamped at the identical instant resolve the same way on
+        # every call. Without it the ORDER BY is only partly satisfied and
+        # Postgres bolts on an Incremental Sort.
         #
         # Declared ASC deliberately: Postgres scans a btree backward at the
         # same cost as forward, so a DESC declaration would buy nothing while
         # making the index one Alembic compares poorly.
         Index(
-            "ix_odds_snapshots_pit",
+            "ix_odds_snapshots_pit_no_line",
             "game_pk",
             "market",
             "selection",
             "book",
             "captured_at",
             "id",
+            postgresql_where=text("line IS NULL"),
+        ),
+        Index(
+            "ix_odds_snapshots_pit_lined",
+            "game_pk",
+            "market",
+            "selection",
+            "book",
+            "line",
+            "captured_at",
+            "id",
+            postgresql_where=text("line IS NOT NULL"),
         ),
         # Whole-game time-ordered scans (line movement across every market).
         # The index above only orders by time WITHIN a fixed

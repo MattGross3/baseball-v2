@@ -421,19 +421,30 @@ class TestComputeClvForBet:
         assert result.closing_odds_american == -175
 
 
+@pytest.mark.performance
 class TestIndexUsage:
     """The planner must reach the closing line by an ORDERED index scan.
 
+    ON FAILURE: INVESTIGATE THE PLAN. Do not loosen these assertions.
+
+    EXPLAIN output changes across major Postgres versions, so a failure here
+    after an upgrade may be cosmetic - but it may equally be the planner
+    having genuinely stopped using the index, which is invisible in every
+    other test in this suite because the query still returns correct rows,
+    just by reading the whole table. Read the plan the assertion printed,
+    decide which happened, and only then adjust.
+
     Asserting merely that the index is *touched* is not enough, and an
     earlier version of this test made exactly that mistake: it passed while
-    the query was doing a bitmap scan over the index followed by a top-N
-    sort, reading every matching row. The name of the index appears in the
-    plan either way. What matters is the absence of a Sort node - that is
-    what distinguishes "seek and stop at the first row" from "read them all
-    and order them".
+    the query did a bitmap scan over the index followed by a top-N sort,
+    reading every matching row. The index name appears in the plan either
+    way. The absence of a Sort node is what distinguishes "seek and stop at
+    the first row" from "read them all and order them".
+
+    Deselect with `-m "not performance"` if you need a fast inner loop.
     """
 
-    async def _load(self, session, run, *, market: str, line, count: int = 8000):
+    async def _load(self, session, run, *, market: str, line, count: int = 50_000):
         rows = [
             {
                 "ingest_run_id": run.id,
@@ -478,48 +489,123 @@ class TestIndexUsage:
             ).all()
         )
 
-    async def test_moneyline_uses_an_ordered_index_scan(self, session, run):
-        # Moneyline is the case that breaks if `line` is put into the index
-        # ahead of captured_at: `line IS NULL` is a valid scan key but not
-        # an equality for pathkey purposes, so the ordering guarantee on
-        # captured_at is lost and Postgres sorts instead.
+    async def test_unlined_market_uses_the_partial_index_ordered(
+        self, session, run
+    ):
+        # `line IS NULL` (every moneyline row) is the case that breaks under
+        # a single index containing `line`: a NullTest never forms an
+        # equivalence class with a constant, so the planner cannot drop the
+        # `line` pathkey and falls back to sorting. The partial index absorbs
+        # the predicate, leaving four equality columns ahead of captured_at.
         await self._load(session, run, market="moneyline", line=None)
         plan = await self._plan(
             session, market="moneyline", selection="away", line_sql="line IS NULL"
         )
 
-        assert "ix_odds_snapshots_pit" in plan, plan
+        assert "ix_odds_snapshots_pit_no_line" in plan, plan
         assert "Seq Scan" not in plan, plan
         assert "Index Scan Backward" in plan, plan
         # THE assertion. A Sort here means the index stopped supplying order.
         assert "Sort" not in plan, plan
         assert "Bitmap" not in plan, plan
 
-    async def test_totals_uses_an_ordered_index_scan(self, session, run):
+    async def test_lined_market_uses_the_partial_index_ordered(self, session, run):
+        # `line = 8.5` implies `line IS NOT NULL`, which Postgres can refute
+        # against the partial predicate, so this matches the lined index -
+        # where `line` is a genuine equality column and the scan narrows to
+        # that one line rather than filtering siblings.
         await self._load(session, run, market="total", line=Decimal("8.5"))
         plan = await self._plan(
             session, market="total", selection="over", line_sql="line = 8.5"
         )
 
-        assert "ix_odds_snapshots_pit" in plan, plan
+        assert "ix_odds_snapshots_pit_lined" in plan, plan
         assert "Seq Scan" not in plan, plan
         assert "Index Scan Backward" in plan, plan
         assert "Sort" not in plan, plan
         assert "Bitmap" not in plan, plan
 
-    async def test_line_is_a_filter_not_an_index_column(self, session, run):
-        # Documents the deliberate omission, so that "tightening" the index
-        # by adding `line` fails here with an explanation rather than
-        # silently costing a sort on every moneyline lookup.
-        definition = (
-            await session.execute(
-                text(
-                    "SELECT indexdef FROM pg_indexes "
-                    "WHERE indexname = 'ix_odds_snapshots_pit'"
+    async def test_lined_lookup_does_not_scan_sibling_lines(self, session, run):
+        """A market that has moved across many lines must not degrade.
+
+        This is what the lined partial index buys over simply dropping
+        `line`: with `line` as an index column the scan narrows to the one
+        line, instead of walking every snapshot for that
+        game/market/selection/book and filtering. Asserted via `Rows Removed
+        by Filter`, which is the direct measure of siblings walked over.
+        """
+        # 20 alternate lines x 30 polls for one game/market/selection/book.
+        rows = [
+            {
+                "ingest_run_id": run.id,
+                "game_pk": GAME_PK,
+                "game_date": GAME_DATE,
+                "commence_time_utc": FIRST_PITCH,
+                "book": "pinnacle",
+                "market": "total",
+                "selection": "over",
+                "line": Decimal("6.0") + Decimal(i % 20) * Decimal("0.5"),
+                "odds_american": -110,
+                "captured_at": FIRST_PITCH - dt.timedelta(minutes=i),
+            }
+            for i in range(600)
+        ]
+        await session.execute(OddsSnapshot.__table__.insert(), rows)
+        await session.commit()
+        await session.execute(text("ANALYZE odds_snapshots"))
+
+        plan = "\n".join(
+            r[0]
+            for r in (
+                await session.execute(
+                    text(
+                        """
+                        EXPLAIN ANALYZE
+                        SELECT odds_american FROM odds_snapshots
+                        WHERE game_pk = :pk AND market = 'total'
+                          AND selection = 'over' AND book = 'pinnacle'
+                          AND line = 6.0 AND captured_at < :before
+                        ORDER BY captured_at DESC, id DESC
+                        LIMIT 1
+                        """
+                    ),
+                    {"pk": GAME_PK, "before": FIRST_PITCH},
                 )
-            )
-        ).scalar_one()
-        assert "line" not in definition, definition
-        assert (
-            "(game_pk, market, selection, book, captured_at, id)" in definition
-        ), definition
+            ).all()
+        )
+
+        assert "ix_odds_snapshots_pit_lined" in plan, plan
+        assert "Sort" not in plan, plan
+        # The oldest line in the set, so a filtering plan would have to walk
+        # past hundreds of sibling rows to reach it.
+        assert "Rows Removed by Filter" not in plan, plan
+
+    async def test_both_partial_indexes_exist_with_their_predicates(
+        self, session, run
+    ):
+        # Documents the split so that "simplifying" it back to one index
+        # fails here with an explanation rather than silently costing a sort
+        # on every unlined lookup.
+        rows = dict(
+            (
+                await session.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes WHERE "
+                        "indexname IN ('ix_odds_snapshots_pit_no_line',"
+                        "'ix_odds_snapshots_pit_lined')"
+                    )
+                )
+            ).all()
+        )
+        assert set(rows) == {
+            "ix_odds_snapshots_pit_no_line",
+            "ix_odds_snapshots_pit_lined",
+        }
+
+        unlined = rows["ix_odds_snapshots_pit_no_line"]
+        assert "(game_pk, market, selection, book, captured_at, id)" in unlined
+        assert "WHERE (line IS NULL)" in unlined
+
+        lined = rows["ix_odds_snapshots_pit_lined"]
+        assert "(game_pk, market, selection, book, line, captured_at, id)" in lined
+        assert "WHERE (line IS NOT NULL)" in lined

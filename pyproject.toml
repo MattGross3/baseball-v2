@@ -48,6 +48,7 @@ asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "session"
 markers = [
     "postgres: requires a live Postgres 16 (docker compose up -d postgres)",
+    "performance: asserts on query plans; needs bulk data. Deselect with -m 'not performance'",
 ]
 filterwarnings = ["error::DeprecationWarning"]
 

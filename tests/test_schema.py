@@ -482,7 +482,8 @@ class TestIndexesExist:
             .all()
         )
         assert {
-            "ix_odds_snapshots_pit",
+            "ix_odds_snapshots_pit_no_line",
+            "ix_odds_snapshots_pit_lined",
             "ix_odds_snapshots_game_captured",
             "ix_odds_snapshots_ingest_run_id",
             "ix_bets_game_pk",
@@ -494,21 +495,30 @@ class TestIndexesExist:
 
     async def test_point_in_time_index_column_order(self, session):
         # The column ORDER is what makes the ordered seek possible: equality
-        # predicates first, captured_at last. `line` is excluded on purpose -
-        # see tests/test_clv_queries.py::TestIndexUsage. A well-meaning
-        # reordering keeps every functional test passing and quietly costs a
-        # sort on every moneyline lookup.
-        definition = (
-            await session.execute(
-                text(
-                    "SELECT indexdef FROM pg_indexes "
-                    "WHERE indexname = 'ix_odds_snapshots_pit'"
+        # predicates first, captured_at then id last. The split into two
+        # partial indexes on line-presence is deliberate - see
+        # tests/test_clv_queries.py::TestIndexUsage. A well-meaning
+        # consolidation keeps every functional test passing and quietly costs
+        # a sort on every unlined lookup.
+        rows = dict(
+            (
+                await session.execute(
+                    text(
+                        "SELECT indexname, indexdef FROM pg_indexes WHERE "
+                        "indexname IN ('ix_odds_snapshots_pit_no_line',"
+                        "'ix_odds_snapshots_pit_lined')"
+                    )
                 )
-            )
-        ).scalar_one()
+            ).all()
+        )
         assert (
-            "(game_pk, market, selection, book, captured_at, id)" in definition
-        ), definition
+            "(game_pk, market, selection, book, captured_at, id)"
+            in rows["ix_odds_snapshots_pit_no_line"]
+        )
+        assert (
+            "(game_pk, market, selection, book, line, captured_at, id)"
+            in rows["ix_odds_snapshots_pit_lined"]
+        )
 
     async def test_partial_indexes_are_actually_partial(self, session):
         rows = dict(
