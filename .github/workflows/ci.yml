@@ -15,11 +15,16 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  # Matches docker-compose.yml. Port 5432 here is correct: inside the runner
-  # the service container is the only Postgres, unlike the dev machine where
-  # 5432 belongs to another project.
-  DATABASE_URL: postgresql+psycopg://baseball:baseball@localhost:5432/baseball
-  TEST_DATABASE_URL: postgresql+psycopg://baseball:baseball@localhost:5432/baseball_test
+  # Port 5433, matching docker-compose.yml and .env.example.
+  #
+  # The runner could use 5432 - the service container is the only Postgres
+  # here - but then CI and development would differ in a way that has to be
+  # special-cased somewhere. It already was: the conftest guard refuses port
+  # 5432 outright, and this workflow's first run failed on exactly that.
+  # Making the two environments identical is cheaper than teaching the guard
+  # which machine it is on.
+  DATABASE_URL: postgresql+psycopg://baseball:baseball@localhost:5433/baseball
+  TEST_DATABASE_URL: postgresql+psycopg://baseball:baseball@localhost:5433/baseball_test
 
 jobs:
   lint:
@@ -51,7 +56,8 @@ jobs:
           POSTGRES_PASSWORD: baseball
           POSTGRES_DB: baseball
         ports:
-          - 5432:5432
+          # Host 5433 -> container 5432, matching docker-compose.yml.
+          - 5433:5432
         options: >-
           --health-cmd "pg_isready -U baseball -d baseball"
           --health-interval 5s
@@ -94,7 +100,10 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # Run the scanner directly rather than through gitleaks-action, which
+      # failed with "stderr is not empty" after scanning ~0 bytes - it
+      # reported success on a scan that never happened, which is the worst
+      # possible behaviour for a secret scanner.
       - name: gitleaks
-        uses: gitleaks/gitleaks-action@v2
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          docker run --rm -v "$PWD:/repo"             zricethezav/gitleaks:latest             detect --source=/repo --redact --verbose --no-banner
