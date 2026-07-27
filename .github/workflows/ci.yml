@@ -105,5 +105,7 @@ jobs:
       # reported success on a scan that never happened, which is the worst
       # possible behaviour for a secret scanner.
       - name: gitleaks
-        run: |
-          docker run --rm -v "$PWD:/repo"             zricethezav/gitleaks:latest             detect --source=/repo --redact --verbose --no-banner
+        run: >-
+          docker run --rm -v "$PWD:/repo"
+          zricethezav/gitleaks:latest
+          detect --source=/repo --redact --verbose --no-banner
