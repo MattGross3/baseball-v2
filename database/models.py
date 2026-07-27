@@ -29,6 +29,7 @@ from sqlalchemy import (
     Integer,
     Numeric,
     Text,
+    UniqueConstraint,
     func,
     text,
 )
@@ -138,11 +139,18 @@ class IngestRun(Base):
 class OddsSnapshot(Base):
     """One observed price, for one selection, at one book, at one instant.
 
-    APPEND-ONLY. No UPDATE, no UPSERT, ever. Two identical prices captured at
-    different times are two legitimate observations, not a conflict - "we
-    checked at T and it had not moved" is real information, and there is
-    deliberately no unique constraint on the natural key that would collapse
-    them.
+    APPEND-ONLY. No UPDATE, ever. Two identical prices captured at DIFFERENT
+    times are two legitimate observations, not a conflict - "we checked at T
+    and it had not moved" is real information.
+
+    But the same observation written twice is not two observations. The
+    natural key is unique, and writers use ON CONFLICT DO NOTHING, which
+    inserts or does not: it never rewrites an existing row, so append-only
+    holds. This makes a retried ingest run idempotent instead of pushing the
+    cost of de-duplication onto every read forever.
+
+    That only works because `captured_at` is stamped from the ingest run's
+    start time rather than from now() - see the column comment below.
 
     Long/narrow rather than one wide row per game. A wide row cannot express
     per-book prices, cannot represent a market with more than two sides, and
@@ -152,6 +160,25 @@ class OddsSnapshot(Base):
 
     __tablename__ = "odds_snapshots"
     __table_args__ = (
+        # One row per distinct observation. Retried ingest runs collide here
+        # and are dropped by ON CONFLICT DO NOTHING rather than duplicated.
+        #
+        # NULLS NOT DISTINCT is essential, not decoration. Postgres treats
+        # NULLs as distinct in a unique index by default, so without it every
+        # moneyline row - where `line IS NULL`, the most common market -
+        # would collide with nothing and duplicate freely, leaving the
+        # constraint working only for totals and run lines. Requires
+        # Postgres 15+; we target 16.
+        UniqueConstraint(
+            "game_pk",
+            "market",
+            "selection",
+            "book",
+            "line",
+            "captured_at",
+            name="uq_odds_snapshots_observation",
+            postgresql_nulls_not_distinct=True,
+        ),
         CheckConstraint(_VALID_AMERICAN_ODDS, name="odds_american_valid"),
         CheckConstraint(_MARKET_VALUES, name="market"),
         CheckConstraint(_SELECTION_VALUES, name="selection"),
@@ -253,7 +280,21 @@ class OddsSnapshot(Base):
     line: Mapped[Decimal | None] = mapped_column(Numeric(4, 2), nullable=True)
     odds_american: Mapped[int] = mapped_column(Integer)
 
-    captured_at: Mapped[dt.datetime] = mapped_column(UtcDateTime, default=utcnow)
+    # When the price was observed. Stamped from the owning ingest run's
+    # started_at, NOT from now() at insert time - see betting/cli.py.
+    #
+    # This is what makes the unique constraint above mean anything. If a
+    # retried poll wrote a fresh now(), the retry would land microseconds
+    # from the original, collide with nothing, and be stored as a second
+    # "observation" of a single real observation. Sourcing it from the run
+    # makes retries genuinely idempotent, and makes "every price from one
+    # poll shares a timestamp" true - which is also what lets the opposing
+    # side of a market be found at the same instant.
+    #
+    # Deliberately no Python-side default: a writer that has not decided
+    # what instant it is recording should fail, not silently record the
+    # instant the INSERT happened to run.
+    captured_at: Mapped[dt.datetime] = mapped_column(UtcDateTime)
 
     ingest_run: Mapped[IngestRun] = relationship(back_populates="snapshots")
 

@@ -4,11 +4,22 @@ Phase 0 schema: persistence for the CLV measurement loop.
 
 Three things here are load-bearing and easy to undo by accident:
 
-1. `odds_snapshots` has NO unique constraint on its natural key. That
-   absence IS the append-only guarantee. Two identical prices captured at
-   different times are two real observations - "we checked at T and it had
-   not moved" is information. A unique key here, or an ON CONFLICT clause
-   in the writer, would quietly discard it.
+1. `odds_snapshots` is APPEND-ONLY: no UPDATE, ever. But the same
+   observation written twice is not two observations, so the natural key
+   (game_pk, market, selection, book, line, captured_at) is UNIQUE and
+   writers use ON CONFLICT DO NOTHING - which inserts or does not, and
+   never rewrites a row. A retried ingest run is therefore idempotent
+   instead of pushing de-duplication onto every read forever.
+
+   NULLS NOT DISTINCT is essential, not decoration. Postgres treats NULLs
+   as distinct in a unique index by default, so without it every moneyline
+   row - where line IS NULL, the most common market - would collide with
+   nothing and duplicate freely. Requires Postgres 15+; we target 16.
+
+   This only works because `captured_at` is stamped from the owning ingest
+   run's started_at rather than now(). A retry writing a fresh now() would
+   land microseconds from the original, collide with nothing, and be stored
+   as a second observation of one real observation.
 
 2. `game_date` (DATE, venue-local) and `commence_time_utc` (TIMESTAMPTZ)
    hold different facts and neither is derivable from the other. A 10:10pm
@@ -29,8 +40,8 @@ Three things here are load-bearing and easy to undo by accident:
    preceding column is bound by EQUALITY. `line IS NULL` is a NullTest, not
    an equality operator, so it never forms an equivalence class with a
    constant and the planner cannot drop the `line` pathkey - it reads every
-   matching row and sorts. Measured at 400k rows, a single index containing
-   `line` cost 289.99 versus 8.47 for the ordered plan.
+   matching row and sorts. At 400k rows a single index containing `line`
+   cost 289.99 against 8.47 for the ordered plan.
 
    Dropping `line` entirely fixes the ordering but makes a lined lookup scan
    every snapshot for that game/market/selection/book across ALL lines and
@@ -38,16 +49,17 @@ Three things here are load-bearing and easy to undo by accident:
    into its predicate so it is not a column at all, and the lined index has
    `line = $5` as a genuine equality that narrows the scan.
 
-   This only works if the query emits `line IS NULL` or `line = $5` so the
+   This depends on the query emitting `line IS NULL` or `line = $5` so the
    planner can match a predicate. `IS NOT DISTINCT FROM` matches neither and
    is not indexable at all. See betting/clv.py::find_closing_snapshot.
 
 There is intentionally no `games` table yet, so `game_pk` carries no foreign
 key - it is a bare indexed integer until a schedule ingest exists to own it.
 
+
 Revision ID: 0001
-Revises:
-Create Date: 2026-07-27 15:55:52.028051
+Revises: 
+Create Date: 2026-07-27 16:02:16.917858
 """
 from __future__ import annotations
 
@@ -138,7 +150,8 @@ def upgrade() -> None:
     sa.CheckConstraint('game_pk > 0', name=op.f('ck_odds_snapshots_game_pk_positive')),
     sa.CheckConstraint('odds_american <= -100 OR odds_american >= 100', name=op.f('ck_odds_snapshots_odds_american_valid')),
     sa.ForeignKeyConstraint(['ingest_run_id'], ['ingest_runs.id'], name='fk_odds_snapshots_ingest_run'),
-    sa.PrimaryKeyConstraint('id', name=op.f('pk_odds_snapshots'))
+    sa.PrimaryKeyConstraint('id', name=op.f('pk_odds_snapshots')),
+    sa.UniqueConstraint('game_pk', 'market', 'selection', 'book', 'line', 'captured_at', name='uq_odds_snapshots_observation', postgresql_nulls_not_distinct=True)
     )
     op.create_index('ix_odds_snapshots_game_captured', 'odds_snapshots', ['game_pk', 'captured_at'], unique=False)
     op.create_index('ix_odds_snapshots_ingest_run_id', 'odds_snapshots', ['ingest_run_id'], unique=False)

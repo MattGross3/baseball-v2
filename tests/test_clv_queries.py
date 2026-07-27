@@ -83,15 +83,16 @@ class TestPointInTime:
     async def test_none_when_there_are_no_prices_at_all(self, session, run):
         assert await closing(session) is None
 
-    async def test_ties_broken_deterministically(self, session, run):
-        # Two rows at the identical instant (a re-run writing both sides in
-        # one batch). The later-inserted row wins, so repeated calls cannot
-        # disagree with each other.
-        at = FIRST_PITCH - 1 * H
+    async def test_repeated_calls_agree(self, session, run):
+        # The unique constraint now makes same-instant duplicates for one
+        # selection impossible, so the `id DESC` tie-break should never
+        # actually fire. It stays in the query as a defensive guarantee that
+        # two calls cannot disagree even if that constraint were ever
+        # relaxed - determinism should not depend on a constraint holding.
         session.add_all(
             [
-                make_snapshot(run, captured_at=at, odds=110),
-                make_snapshot(run, captured_at=at, odds=115),
+                make_snapshot(run, captured_at=FIRST_PITCH - 2 * H, odds=110),
+                make_snapshot(run, captured_at=FIRST_PITCH - 1 * H, odds=115),
             ]
         )
         await session.flush()
@@ -444,25 +445,40 @@ class TestIndexUsage:
     Deselect with `-m "not performance"` if you need a fast inner loop.
     """
 
-    async def _load(self, session, run, *, market: str, line, count: int = 50_000):
+    async def _load(self, session, run, *, market: str, line, polls: int = 42):
+        """Bulk-load ~50k snapshots with unique natural keys.
+
+        Built from nested loops rather than modular arithmetic on a single
+        counter. The modular version repeated the full natural key every
+        LCM(games, times, books, selections) rows, which the observation
+        uniqueness constraint correctly rejects - the fixture was generating
+        the exact duplicate it exists to forbid.
+
+        200 games x 3 books x 2 selections x 42 polls = 50,400 rows, which is
+        enough that a sequential scan is genuinely the more expensive plan.
+        At 8k the planner may legitimately prefer to scan and the assertions
+        below would prove nothing.
+        """
+        selections = ("over", "under") if market == "total" else ("home", "away")
+        books = ("pinnacle", "draftkings", "fanduel")
+
         rows = [
             {
                 "ingest_run_id": run.id,
-                "game_pk": GAME_PK + (i % 400),
+                "game_pk": GAME_PK + game,
                 "game_date": GAME_DATE,
                 "commence_time_utc": FIRST_PITCH,
-                "book": ["pinnacle", "draftkings", "fanduel"][i % 3],
+                "book": book,
                 "market": market,
-                "selection": (
-                    ("over" if i % 2 else "under")
-                    if market == "total"
-                    else ("away" if i % 2 else "home")
-                ),
+                "selection": selection,
                 "line": line,
-                "odds_american": 100 + (i % 300),
-                "captured_at": FIRST_PITCH - dt.timedelta(minutes=i % 600),
+                "odds_american": 100 + (poll % 300),
+                "captured_at": FIRST_PITCH - dt.timedelta(minutes=poll + 1),
             }
-            for i in range(count)
+            for game in range(200)
+            for book in books
+            for selection in selections
+            for poll in range(polls)
         ]
         await session.execute(OddsSnapshot.__table__.insert(), rows)
         await session.commit()

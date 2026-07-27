@@ -33,6 +33,7 @@ import sys
 from decimal import Decimal, InvalidOperation
 
 from sqlalchemy import select
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from betting.clv import compute_clv_for_bet
@@ -192,8 +193,18 @@ async def add_snapshot(
     odds_american: int,
     captured_at: dt.datetime | None = None,
     line: Decimal | None = None,
-) -> OddsSnapshot:
-    """Record one observed price. Append-only: this never updates a row."""
+) -> OddsSnapshot | None:
+    """Record one observed price.
+
+    Append-only: this never updates a row. Re-recording the same observation
+    is a no-op rather than a duplicate or an error, so a retried ingest run
+    is idempotent. Returns None when the row already existed.
+
+    `captured_at` defaults to the ingest run's start time, NOT to now().
+    Every price from one poll then shares a timestamp, which is what makes
+    the unique constraint able to recognise a retry. Pass it explicitly only
+    when back-dating a hand-entered historical price.
+    """
     market, selection, line = validate_market_selection(market, selection, line)
     validate_american(odds_american)
 
@@ -203,20 +214,30 @@ async def add_snapshot(
         run_kind="snapshot_add",
         params={"game_pk": game_pk, "book": book, "market": market},
     ) as run:
-        snapshot = OddsSnapshot(
-            ingest_run_id=run.id,
-            game_pk=game_pk,
-            game_date=game_date,
-            commence_time_utc=require_utc(commence_time_utc),
-            book=book,
-            market=market,
-            selection=selection,
-            line=line,
-            odds_american=odds_american,
-            captured_at=require_utc(captured_at or utcnow()),
+        observed_at = require_utc(captured_at) if captured_at else run.started_at
+
+        # ON CONFLICT DO NOTHING inserts or it does not; it never rewrites an
+        # existing row, so this is not an upsert and append-only still holds.
+        # RETURNING yields no row when the observation was already recorded.
+        stmt = (
+            pg_insert(OddsSnapshot)
+            .values(
+                ingest_run_id=run.id,
+                game_pk=game_pk,
+                game_date=game_date,
+                commence_time_utc=require_utc(commence_time_utc),
+                book=book,
+                market=market,
+                selection=selection,
+                line=line,
+                odds_american=odds_american,
+                captured_at=observed_at,
+            )
+            .on_conflict_do_nothing(constraint="uq_odds_snapshots_observation")
+            .returning(OddsSnapshot)
         )
-        session.add(snapshot)
-        run.rows_written = 1
+        snapshot = (await session.execute(stmt)).scalars().first()
+        run.rows_written = 1 if snapshot is not None else 0
     return snapshot
 
 

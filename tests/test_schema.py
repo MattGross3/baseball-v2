@@ -334,31 +334,60 @@ class TestAppendOnly:
         assert len(stored) == 3
         assert {s.odds_american for s in stored} == {130}
 
-    async def test_no_unique_constraint_on_the_natural_key(self, session):
-        rows = (
+    async def test_the_same_observation_cannot_be_stored_twice(self, session, run):
+        # The same natural key at the same instant is ONE observation, not
+        # two. Writers use ON CONFLICT DO NOTHING so a retry is a no-op;
+        # writing it directly, as here, raises.
+        at = FIRST_PITCH - H
+        session.add(make_snapshot(run, captured_at=at, odds=130))
+        await session.commit()
+
+        await expect_rejected(session, make_snapshot(run, captured_at=at, odds=130))
+
+    async def test_unique_key_treats_nulls_as_not_distinct(self, session):
+        """The detail the whole constraint hinges on.
+
+        Postgres treats NULLs as DISTINCT in a unique index by default, so a
+        plain unique constraint over a nullable `line` would never fire for
+        moneyline - the most common market, where line IS NULL - and the
+        constraint would silently protect only totals and run lines.
+        """
+        definition = (
             await session.execute(
                 text(
-                    "SELECT conname FROM pg_constraint c "
-                    "JOIN pg_class t ON t.oid = c.conrelid "
-                    "WHERE t.relname = 'odds_snapshots' AND c.contype IN ('u','p')"
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname = 'uq_odds_snapshots_observation'"
                 )
             )
-        ).scalars().all()
-        # Only the primary key on `id`. Any other unique constraint here
-        # would be a mechanism for silently discarding observations.
-        assert rows == ["pk_odds_snapshots"]
+        ).scalar_one()
+        assert "NULLS NOT DISTINCT" in definition, definition
+        assert (
+            "(game_pk, market, selection, book, line, captured_at)" in definition
+        ), definition
 
-    async def test_even_the_same_instant_is_allowed_twice(self, session, run):
+    async def test_moneyline_duplicate_is_actually_caught(self, session, run):
+        # The behavioural half of the test above: moneyline rows carry
+        # line IS NULL, and must still collide.
         at = FIRST_PITCH - H
-        session.add_all(
-            [
-                make_snapshot(run, captured_at=at, odds=130),
-                make_snapshot(run, captured_at=at, odds=130),
-            ]
-        )
+        session.add(make_snapshot(run, captured_at=at, odds=130, market="moneyline"))
         await session.commit()
-        stored = (await session.execute(select(OddsSnapshot))).scalars().all()
-        assert len(stored) == 2
+
+        await expect_rejected(
+            session, make_snapshot(run, captured_at=at, odds=130, market="moneyline")
+        )
+
+    async def test_a_different_price_at_the_same_instant_still_collides(
+        self, session, run
+    ):
+        # Two different prices stamped at the same instant for the same
+        # selection is not two observations - it is one observation recorded
+        # inconsistently. Rejecting it surfaces the bug rather than leaving
+        # an ambiguous pair for the tie-break to guess between.
+        at = FIRST_PITCH - H
+        session.add(make_snapshot(run, captured_at=at, odds=130))
+        await session.commit()
+
+        await expect_rejected(session, make_snapshot(run, captured_at=at, odds=115))
 
 
 class TestProvenance:
