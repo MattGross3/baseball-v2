@@ -2,9 +2,14 @@
 name = "baseball-v2"
 version = "0.1.0"
 description = "Betting analytics: persistence layer and CLV measurement loop"
-# claude.md specifies Python 3.12. Expressed as a floor rather than a pin
-# because 3.12 is not installed on this machine (3.13.7 and 3.14.3 are) and
-# nothing here uses a version-specific feature newer than StrEnum (3.11).
+# claude.md specifies Python 3.12. Kept as a floor rather than a pin, because
+# nothing here uses a feature newer than StrEnum (3.11).
+#
+# Development and CI run 3.13.7 (see .python-version), NOT 3.14. Phase 2 brings
+# pybaseball, which pulls pandas, numpy, lxml, bs4 and matplotlib; being on the
+# newest interpreter buys nothing here and costs an afternoon the first time a
+# wheel is not built for it. 3.14 also deprecates the asyncio policy API and
+# asyncio.iscoroutinefunction, both of which this project had to route around.
 requires-python = ">=3.12"
 
 dependencies = [
