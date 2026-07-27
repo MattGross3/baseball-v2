@@ -6,6 +6,7 @@ invents names for unnamed constraints, Alembic autogenerate cannot match an
 existing constraint to a model-side one, and `alembic check` reports drift
 that is not real. It also means a downgrade can drop a constraint by name.
 """
+
 from __future__ import annotations
 
 from sqlalchemy import MetaData

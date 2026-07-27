@@ -23,6 +23,7 @@ The command handlers are thin wrappers over plain async functions
 (`log_bet`, `settle_bet`, `add_snapshot`, ...) so tests call those directly
 rather than shelling out to a subprocess.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -48,15 +49,15 @@ from database.models import Bet, OddsSnapshot
 from database.utc import require_utc, utcnow
 
 __all__ = [
-    "log_bet",
-    "settle_bet",
     "add_snapshot",
+    "build_parser",
     "list_bets",
+    "log_bet",
+    "main",
     "parse_american",
     "parse_stake_cents",
     "parse_utc",
-    "build_parser",
-    "main",
+    "settle_bet",
 ]
 
 SOURCE = "manual-cli"
@@ -100,9 +101,18 @@ def parse_stake_cents(value: str) -> int:
         raise argparse.ArgumentTypeError(
             f"{value!r} is not a valid amount (e.g. 50, 50.00, 12.34)"
         ) from None
+    # NaN and Infinity are valid Decimals. NaN fails every comparison, so it
+    # slips past `amount <= 0`, and its exponent is the string 'n' rather than
+    # an int - negating which raises TypeError instead of a usable message.
+    if not amount.is_finite():
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a finite amount (e.g. 50, 50.00, 12.34)"
+        )
     if amount <= 0:
         raise argparse.ArgumentTypeError(f"stake must be positive, got {value!r}")
-    if -amount.as_tuple().exponent > 2:
+    exponent = amount.as_tuple().exponent
+    assert isinstance(exponent, int)  # guaranteed by is_finite() above
+    if -exponent > 2:
         raise argparse.ArgumentTypeError(
             f"{value!r} has sub-cent precision; use at most two decimal places"
         )
@@ -128,7 +138,7 @@ def parse_utc(value: str) -> dt.datetime:
             f"{value!r} has no timezone offset. Timestamps must be explicit - "
             "append 'Z' for UTC, or an offset like '-04:00'."
         )
-    return parsed.astimezone(dt.timezone.utc)
+    return parsed.astimezone(dt.UTC)
 
 
 def parse_date(value: str) -> dt.date:
@@ -318,7 +328,6 @@ async def settle_bet(
     async with ingest_run(
         session, source=SOURCE, run_kind="bet_settle", params={"bet_id": bet_id}
     ) as run:
-        bet = await session.get(Bet, bet_id)
         bet.status = status.value
         bet.settled_at = require_utc(settled_at or utcnow())
         bet.payout_cents = (
@@ -392,10 +401,11 @@ async def _cmd_bet_log(args) -> int:
 
 async def _cmd_bet_settle(args) -> int:
     async with session_scope() as session:
-        bet = await settle_bet(
-            session, args.id, args.status, payout_cents=args.payout
-        )
+        bet = await settle_bet(session, args.id, args.status, payout_cents=args.payout)
         await session.flush()
+        # settle_bet always assigns a payout; ck_bets_settlement_coherent
+        # would reject the row otherwise.
+        assert bet.payout_cents is not None
         profit = profit_cents(bet.stake_cents, bet.payout_cents)
         print(
             f"settled {_describe(bet)}\n"
@@ -475,6 +485,20 @@ async def _cmd_snapshot_add(args) -> int:
             captured_at=args.captured_at,
         )
         await session.flush()
+        if snapshot is None:
+            # Already recorded. ON CONFLICT DO NOTHING makes a retry a no-op
+            # rather than an error, so say so plainly instead of implying a
+            # write happened.
+            when = (
+                f"{args.captured_at:%Y-%m-%d %H:%M:%S}Z"
+                if args.captured_at
+                else "this run's start time"
+            )
+            print(
+                f"already recorded: game {args.game_pk} {args.book} "
+                f"{args.market} {args.selection} at {when} - no new row written"
+            )
+            return 0
         line = f" {snapshot.line}" if snapshot.line is not None else ""
         print(
             f"recorded game {snapshot.game_pk} {snapshot.book} {snapshot.market} "
@@ -487,7 +511,8 @@ async def _cmd_snapshot_add(args) -> int:
 def _cmd_devig(args) -> int:
     result = devig_american(args.odds)
     print(f"overround {result.overround * 100:+.3f}%   k = {result.k:.9f}")
-    for odds, raw, fair in zip(args.odds, result.raw_probs, result.fair_probs):
+    triples = zip(args.odds, result.raw_probs, result.fair_probs, strict=True)
+    for odds, raw, fair in triples:
         print(f"  {_odds(odds):>7}  raw {raw:.6f}  ->  fair {fair:.6f}")
     return 0
 
@@ -518,9 +543,7 @@ def build_parser() -> argparse.ArgumentParser:
             help="first pitch, ISO-8601 with offset (e.g. 2026-07-27T23:05:00Z)",
         )
         p.add_argument("--book", required=True)
-        p.add_argument(
-            "--market", required=True, choices=[m.value for m in Market]
-        )
+        p.add_argument("--market", required=True, choices=[m.value for m in Market])
         p.add_argument(
             "--selection", required=True, choices=[s.value for s in Selection]
         )

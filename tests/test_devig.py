@@ -17,6 +17,7 @@ comes from one of three independent sources:
 Tolerance discipline: closed-form and inverse-construction cases assert to
 1e-10 or tighter. REF cases assert to 1e-6.
 """
+
 from __future__ import annotations
 
 import math
@@ -98,7 +99,7 @@ class TestInverseConstruction:
 
         result = devig_power(vigged, tol=1e-15)
         assert result.k == pytest.approx(k, abs=1e-9)
-        for got, want in zip(result.fair_probs, fair):
+        for got, want in zip(result.fair_probs, fair, strict=True):
             assert got == pytest.approx(want, abs=1e-10)
 
     @pytest.mark.parametrize("k", [1.01, 1.05, 1.2, 1.5])
@@ -116,7 +117,7 @@ class TestInverseConstruction:
         vigged = [p ** (1 / k) for p in fair]
         result = devig_power(vigged, tol=1e-15)
         assert result.k == pytest.approx(k, abs=1e-8)
-        for got, want in zip(result.fair_probs, fair):
+        for got, want in zip(result.fair_probs, fair, strict=True):
             assert got == pytest.approx(want, abs=1e-9)
 
 
@@ -192,8 +193,10 @@ class TestNotMultiplicative:
         # probability than the longshot does. Multiplicative would give every
         # selection the identical ratio.
         result = devig_american([-400, 250, 900])
-        ratios = [f / r for f, r in zip(result.fair_probs, result.raw_probs)]
-        by_raw = sorted(zip(result.raw_probs, ratios))
+        ratios = [
+            f / r for f, r in zip(result.fair_probs, result.raw_probs, strict=True)
+        ]
+        by_raw = sorted(zip(result.raw_probs, ratios, strict=True))
         ordered_ratios = [r for _, r in by_raw]
 
         assert ordered_ratios == sorted(ordered_ratios)
@@ -237,13 +240,13 @@ class TestProperties:
         # k > 1 and every p is in (0, 1), p**k < p for all of them - no
         # selection ever gains probability from devigging an overround book.
         result = devig_american([-400, 250, 900])
-        for fair, raw in zip(result.fair_probs, result.raw_probs):
+        for fair, raw in zip(result.fair_probs, result.raw_probs, strict=True):
             assert fair < raw
 
     def test_every_probability_rises_for_an_underround_book(self):
         # The mirror image: an arb book has k < 1, so p**k > p throughout.
         result = devig_american([105, 105])
-        for fair, raw in zip(result.fair_probs, result.raw_probs):
+        for fair, raw in zip(result.fair_probs, result.raw_probs, strict=True):
             assert fair > raw
 
     def test_underround_implies_k_below_one(self):
@@ -277,7 +280,10 @@ class TestValidation:
         ],
     )
     def test_rejects_bad_probabilities(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(
+            ValueError,
+            match=r"at least 2 selections|strictly between 0 and 1|not finite",
+        ):
             devig_power(bad)
 
     def test_single_selection_message_is_specific(self):

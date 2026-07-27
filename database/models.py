@@ -15,6 +15,7 @@ Conventions enforced here, all from claude.md:
 There is deliberately no `games` table yet, so `game_pk` carries no foreign
 key. It is a bare indexed integer until a schedule ingest exists to own it.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -40,7 +41,7 @@ from database.base import Base
 from database.enums import BetStatus, IngestStatus
 from database.utc import UtcDateTime, utcnow
 
-__all__ = ["IngestRun", "OddsSnapshot", "Bet"]
+__all__ = ["Bet", "IngestRun", "OddsSnapshot"]
 
 # Reused across both tables that store a price. American odds are never 0 and
 # never fall strictly between -100 and +100; a value in that gap is a
@@ -127,7 +128,7 @@ class IngestRun(Base):
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
 
-    snapshots: Mapped[list["OddsSnapshot"]] = relationship(back_populates="ingest_run")
+    snapshots: Mapped[list[OddsSnapshot]] = relationship(back_populates="ingest_run")
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return (

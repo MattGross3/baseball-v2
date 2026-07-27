@@ -3,6 +3,7 @@
 Expected values are exact fractions computed by hand from the definition of
 American odds, not read off the implementation.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -26,7 +27,9 @@ class TestImpliedProbability:
     def test_positive_american(self):
         # +130 risks 100 to win 130 -> break-even at 100 / (130 + 100).
         assert american_to_implied_prob(130) == pytest.approx(100 / 230, abs=1e-15)
-        assert american_to_implied_prob(130) == pytest.approx(0.4347826086956522, abs=1e-15)
+        assert american_to_implied_prob(130) == pytest.approx(
+            0.4347826086956522, abs=1e-15
+        )
 
     def test_even_money_both_signs_agree(self):
         # +100 and -100 are the same price written two ways.
@@ -63,7 +66,7 @@ class TestDecimalConversion:
     def test_rejects_decimal_at_or_below_one(self):
         # Decimal odds of 1.0 would be a bet that returns exactly the stake.
         for bad in (1.0, 0.5, 0.0, -2.0, float("inf"), float("nan")):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="must be finite and greater than 1"):
                 decimal_to_american(bad)
 
 
@@ -78,7 +81,7 @@ class TestProbabilityToAmerican:
 
     def test_rejects_out_of_range(self):
         for bad in (0.0, 1.0, -0.1, 1.5, float("nan")):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="strictly between 0 and 1"):
                 implied_prob_to_american(bad)
 
 
@@ -124,5 +127,5 @@ class TestValidation:
         # conversion refuses a bad price rather than returning a plausible
         # but meaningless number.
         for fn in (american_to_decimal, american_to_implied_prob, profit_multiple):
-            with pytest.raises(ValueError):
+            with pytest.raises(ValueError, match="not a valid American price"):
                 fn(50)

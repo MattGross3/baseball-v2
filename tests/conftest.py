@@ -13,6 +13,7 @@ Schema is built by running the actual Alembic migration rather than
 would hide it: the tests would pass against a schema that no deployment
 ever has.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -92,7 +93,9 @@ def _admin_dsn(url_str: str) -> str:
     CREATE/DROP DATABASE cannot run from inside the database being dropped.
     """
     url = make_url(url_str).set(database="postgres")
-    return url.render_as_string(hide_password=False).replace("postgresql+psycopg://", "postgresql://")
+    return url.render_as_string(hide_password=False).replace(
+        "postgresql+psycopg://", "postgresql://"
+    )
 
 
 def _assert_safe_to_drop(admin_dsn: str, dbname: str) -> None:
@@ -138,7 +141,8 @@ def database_url() -> Iterator[str]:
             conn.execute("SELECT 1")
     except psycopg.OperationalError as exc:
         pytest.skip(
-            f"Postgres unavailable at {url.host}:{url.port} ({exc.__class__.__name__}). "
+            f"Postgres unavailable at {url.host}:{url.port} "
+            f"({exc.__class__.__name__}). "
             "Start it with: docker compose up -d postgres"
         )
 
@@ -204,7 +208,7 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 # is the same day here, except where a test deliberately exercises the
 # late-Pacific case where they differ.
 
-FIRST_PITCH = dt.datetime(2026, 7, 27, 23, 5, tzinfo=dt.timezone.utc)
+FIRST_PITCH = dt.datetime(2026, 7, 27, 23, 5, tzinfo=dt.UTC)
 GAME_DATE = dt.date(2026, 7, 27)
 GAME_PK = 776543
 

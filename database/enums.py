@@ -10,17 +10,18 @@ two-line migration that rolls back cleanly.
 passed straight into queries and compared against values read back from the
 database without conversion.
 """
+
 from __future__ import annotations
 
 from enum import StrEnum
 
 __all__ = [
-    "Market",
-    "Selection",
+    "OPPOSITE_SELECTION",
+    "SELECTIONS_FOR_MARKET",
     "BetStatus",
     "IngestStatus",
-    "SELECTIONS_FOR_MARKET",
-    "OPPOSITE_SELECTION",
+    "Market",
+    "Selection",
 ]
 
 

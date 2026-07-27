@@ -4,6 +4,7 @@ Deliberately small in Phase 0: there are no external API keys yet because
 there are no ingest workers yet (see the plan's "Deliberately NOT in this
 phase"). The only thing that needs configuring is where Postgres lives.
 """
+
 from __future__ import annotations
 
 from pydantic import Field

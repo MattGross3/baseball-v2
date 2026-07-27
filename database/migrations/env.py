@@ -6,22 +6,23 @@ no asyncio bridging inside the migration runner - Alembic's own machinery
 stays entirely synchronous, which is one less thing to debug when a
 migration fails.
 """
+
 from __future__ import annotations
 
 import os
 from logging.config import fileConfig
+from typing import Any, Literal
 
 import sqlalchemy as sa
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from config import settings
-from database.base import Base
-
 # Importing the models module is what populates Base.metadata. Without it
 # autogenerate compares against an empty schema and cheerfully writes a
 # migration that drops every table.
 import database.models  # noqa: F401
+from config import settings
+from database.base import Base
 
 config = context.config
 
@@ -31,7 +32,7 @@ if config.config_file_name is not None:
 target_metadata = Base.metadata
 
 
-def render_item(type_, obj, autogen_context):
+def render_item(type_: str, obj: Any, autogen_context: Any) -> str | Literal[False]:
     """Render `UtcDateTime` as the plain `sa.DateTime(timezone=True)` it
     compiles to.
 
@@ -63,7 +64,7 @@ def _database_url() -> str:
     )
 
 
-def assert_database_is_ours(connection) -> None:
+def assert_database_is_ours(connection: sa.Connection) -> None:
     """Refuse to migrate a database this project does not own.
 
     THIS IS NOT PARANOIA. A native PostgreSQL install on the development

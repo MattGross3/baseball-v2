@@ -3,6 +3,7 @@
 Expected values are derived independently (50-digit Decimal bisection run
 outside this project) and quoted below, not read off the implementation.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -12,7 +13,7 @@ import pytest
 from betting.clv import ClvResult, compute_clv, opposite_selection
 from betting.odds import american_to_implied_prob
 
-AT = dt.datetime(2026, 7, 27, 22, 55, tzinfo=dt.timezone.utc)
+AT = dt.datetime(2026, 7, 27, 22, 55, tzinfo=dt.UTC)
 
 # REF: closing market -160 (home) / +140 (away).
 #   raw       0.615384615 / 0.416666667   sum 1.032051282
@@ -62,7 +63,9 @@ class TestPriceBasedClv:
 
     def test_is_the_ratio_of_decimal_odds(self):
         # 2.30 / 2.10 - 1
-        assert clv(130, 110).clv_pct == pytest.approx((2.30 / 2.10 - 1) * 100, abs=1e-12)
+        assert clv(130, 110).clv_pct == pytest.approx(
+            (2.30 / 2.10 - 1) * 100, abs=1e-12
+        )
 
 
 class TestDevigggedClv:
@@ -87,7 +90,7 @@ class TestDevigggedClv:
         assert (result.clv_pct < 0) == (result.clv_prob_points < 0)
 
     @pytest.mark.parametrize(
-        "bet,close,opposing",
+        ("bet", "close", "opposing"),
         [
             (130, 110, -130),
             (130, 140, -160),
@@ -214,16 +217,16 @@ class TestDevigggedClv:
 class TestValidation:
     @pytest.mark.parametrize("bad", [0, 50, -99])
     def test_rejects_invalid_bet_odds(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="not a valid American price"):
             clv(bad, 130)
 
     @pytest.mark.parametrize("bad", [0, 50, -99])
     def test_rejects_invalid_closing_odds(self, bad):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="not a valid American price"):
             clv(130, bad)
 
     def test_rejects_invalid_opposing_odds(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="not a valid American price"):
             clv(130, 140, opposing=50)
 
 
@@ -247,7 +250,7 @@ class TestPurity:
 
 class TestOppositeSelection:
     @pytest.mark.parametrize(
-        "market,selection,expected",
+        ("market", "selection", "expected"),
         [
             ("moneyline", "home", "away"),
             ("moneyline", "away", "home"),
@@ -260,7 +263,7 @@ class TestOppositeSelection:
         assert opposite_selection(market, selection) == expected
 
     @pytest.mark.parametrize(
-        "market,selection",
+        ("market", "selection"),
         [("total", "home"), ("moneyline", "over"), ("run_line", "under")],
     )
     def test_rejects_selection_not_in_market(self, market, selection):

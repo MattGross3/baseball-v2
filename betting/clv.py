@@ -76,6 +76,7 @@ soft book's close is not an efficient price - but that needs multi-book
 ingest, which does not exist yet. The schema supports the switch without a
 migration.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -86,17 +87,21 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from betting.devig import devig_american
-from betting.odds import american_to_decimal, american_to_implied_prob, validate_american
-from database.enums import OPPOSITE_SELECTION, BetStatus, Market, Selection
+from betting.odds import (
+    american_to_decimal,
+    american_to_implied_prob,
+    validate_american,
+)
+from database.enums import OPPOSITE_SELECTION, Market, Selection
 from database.models import Bet, OddsSnapshot
 
 __all__ = [
     "ClvResult",
     "compute_clv",
-    "opposite_selection",
+    "compute_clv_for_bet",
     "find_closing_snapshot",
     "find_opposing_closing_snapshot",
-    "compute_clv_for_bet",
+    "opposite_selection",
 ]
 
 

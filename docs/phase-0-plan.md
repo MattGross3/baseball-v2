@@ -837,3 +837,14 @@ disagree. Documented in `betting/clv.py` and asserted as an invariant.
   `render_item` hook, so no migration imports application code.
 - The verification section's "payout $165.00" was arithmetic error: $50 at
   +130 returns **$115.00**.
+
+---
+
+## Phase boundary: v1 is ported or killed at the end of Phase 2
+
+See [known-gaps.md](known-gaps.md) for the full reasoning. In short: two
+half-systems is worse than either whole one, and "harvest v1 later" is how
+both stay half-alive. By the end of Phase 2 this repository has ingest and a
+`games` table, which is the point at which porting v1's feature and model
+layers becomes mechanical. Either that port happens then, or v2 is abandoned
+and its corrections are back-ported into v1. Not both.

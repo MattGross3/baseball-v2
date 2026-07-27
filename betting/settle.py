@@ -10,6 +10,7 @@ credits back. A won bet returns stake plus profit; a push or void returns
 the stake; a loss returns nothing. Storing total-returned rather than
 profit means P&L is `payout - stake` and never needs to know the status.
 """
+
 from __future__ import annotations
 
 from decimal import ROUND_HALF_UP, Decimal

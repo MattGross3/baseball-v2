@@ -5,6 +5,7 @@ plausible number rather than an error - a closing line taken from the wrong
 book, the wrong line, the wrong game of a doubleheader, or from after first
 pitch all look completely normal in a CLV report.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -27,14 +28,14 @@ H = dt.timedelta(hours=1)
 
 
 async def closing(session, **overrides):
-    kwargs = dict(
-        game_pk=GAME_PK,
-        market="moneyline",
-        selection="away",
-        book="pinnacle",
-        line=None,
-        before=FIRST_PITCH,
-    )
+    kwargs = {
+        "game_pk": GAME_PK,
+        "market": "moneyline",
+        "selection": "away",
+        "book": "pinnacle",
+        "line": None,
+        "before": FIRST_PITCH,
+    }
     kwargs.update(overrides)
     return await find_closing_snapshot(session, **kwargs)
 
@@ -58,9 +59,7 @@ class TestPointInTime:
         assert found.odds_american == 110
         assert found.captured_at == FIRST_PITCH - 1 * H
 
-    async def test_excludes_a_price_captured_exactly_at_first_pitch(
-        self, session, run
-    ):
+    async def test_excludes_a_price_captured_exactly_at_first_pitch(self, session, run):
         # The cutoff is strict. A price stamped at first pitch is already
         # contemporaneous with the game starting.
         session.add_all(
@@ -99,7 +98,8 @@ class TestPointInTime:
 
         first = await closing(session)
         second = await closing(session)
-        assert first is not None and second is not None
+        assert first is not None
+        assert second is not None
         assert first.id == second.id
         assert first.odds_american == 115
 
@@ -174,9 +174,7 @@ class TestScoping:
         await session.flush()
 
         for probe in (Decimal("8.5"), Decimal("8.50")):
-            found = await closing(
-                session, market="total", selection="over", line=probe
-            )
+            found = await closing(session, market="total", selection="over", line=probe)
             assert found is not None, probe
 
     async def test_moneyline_matches_on_null_line(self, session, run):
@@ -291,9 +289,12 @@ class TestOpposingSide:
         await session.flush()
 
         away = await closing(session)
-        assert await find_opposing_closing_snapshot(
-            session, closing=away, before=FIRST_PITCH
-        ) is None
+        assert (
+            await find_opposing_closing_snapshot(
+                session, closing=away, before=FIRST_PITCH
+            )
+            is None
+        )
 
     async def test_totals_opposite_is_under(self, session, run):
         session.add_all(
@@ -383,9 +384,7 @@ class TestComputeClvForBet:
         # these, and raising would make the CLI unusable.
         assert await compute_clv_for_bet(session, bet.id) is None
 
-    async def test_open_bets_get_clv_without_waiting_for_settlement(
-        self, session, run
-    ):
+    async def test_open_bets_get_clv_without_waiting_for_settlement(self, session, run):
         # CLV is knowable the moment the game starts. Gating it on
         # settlement would delay the only signal that converges fast, for no
         # information gain - so there is deliberately no require_settled
@@ -563,9 +562,7 @@ class TestIndexUsage:
             ).all()
         )
 
-    async def test_unlined_market_uses_the_partial_index_ordered(
-        self, session, run
-    ):
+    async def test_unlined_market_uses_the_partial_index_ordered(self, session, run):
         # `line IS NULL` (every moneyline row) is the case that breaks under
         # a single index containing `line`: a NullTest never forms an
         # equivalence class with a constant, so the planner cannot drop the
@@ -654,9 +651,7 @@ class TestIndexUsage:
         # past hundreds of sibling rows to reach it.
         assert "Rows Removed by Filter" not in plan, plan
 
-    async def test_both_partial_indexes_exist_with_their_predicates(
-        self, session, run
-    ):
+    async def test_both_partial_indexes_exist_with_their_predicates(self, session, run):
         # Documents the split so that "simplifying" it back to one index
         # fails here with an explanation rather than silently costing a sort
         # on every unlined lookup.

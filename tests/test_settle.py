@@ -3,6 +3,7 @@
 `payout` means TOTAL RETURNED including the stake - the number the book
 credits back - so P&L is always `payout - stake` regardless of status.
 """
+
 from __future__ import annotations
 
 import pytest
@@ -76,7 +77,7 @@ class TestNonWinningPayouts:
 
 class TestProfit:
     @pytest.mark.parametrize(
-        "status,expected",
+        ("status", "expected"),
         [
             (BetStatus.WON, 3333),
             (BetStatus.LOST, -5000),
@@ -107,5 +108,5 @@ class TestValidation:
         assert payout_cents(5000, 130, "won") == 11500
 
     def test_rejects_unknown_status(self):
-        with pytest.raises(ValueError):
+        with pytest.raises(ValueError, match="is not a valid BetStatus"):
             payout_cents(5000, 130, "cashed_out")

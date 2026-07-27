@@ -18,6 +18,7 @@ observed hours away from when they were.
 completely: the type itself. A per-column validator would work equally well
 until someone adds a column and forgets one.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -27,13 +28,13 @@ from sqlalchemy import DateTime
 from sqlalchemy.engine import Dialect
 from sqlalchemy.types import TypeDecorator
 
-__all__ = ["UtcDateTime", "utcnow", "require_utc"]
+__all__ = ["UtcDateTime", "require_utc", "utcnow"]
 
 
 def utcnow() -> dt.datetime:
     """Timezone-aware current time. Never `datetime.utcnow()`, which returns
     a naive value that looks correct and compares wrongly."""
-    return dt.datetime.now(dt.timezone.utc)
+    return dt.datetime.now(dt.UTC)
 
 
 def require_utc(value: dt.datetime, *, field: str = "datetime") -> dt.datetime:
@@ -53,7 +54,7 @@ def require_utc(value: dt.datetime, *, field: str = "datetime") -> dt.datetime:
             "If you meant the venue-local calendar date, that belongs in the "
             "separate `game_date` DATE column, not here."
         )
-    return value.astimezone(dt.timezone.utc)
+    return value.astimezone(dt.UTC)
 
 
 class UtcDateTime(TypeDecorator[dt.datetime]):
@@ -78,8 +79,8 @@ class UtcDateTime(TypeDecorator[dt.datetime]):
         # connection's timezone rather than necessarily UTC. Normalising here
         # means calling code can compare and format without re-checking.
         if value.tzinfo is None:
-            return value.replace(tzinfo=dt.timezone.utc)
-        return value.astimezone(dt.timezone.utc)
+            return value.replace(tzinfo=dt.UTC)
+        return value.astimezone(dt.UTC)
 
     def __repr__(self) -> str:  # pragma: no cover - debugging aid
         return "UtcDateTime()"
@@ -87,5 +88,5 @@ class UtcDateTime(TypeDecorator[dt.datetime]):
     # SQLAlchemy compares literal values during autogenerate; without this the
     # type is treated as a plain DateTime and `alembic check` reports spurious
     # diffs on every timestamp column.
-    def copy(self, **kw: Any) -> "UtcDateTime":
+    def copy(self, **kw: Any) -> UtcDateTime:
         return UtcDateTime()

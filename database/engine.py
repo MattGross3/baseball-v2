@@ -4,10 +4,12 @@ psycopg3 drives both the async application and Alembic's synchronous
 migration runner from the same URL, so there is one connection string to
 keep correct rather than two.
 """
+
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any
 
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -18,13 +20,13 @@ from sqlalchemy.ext.asyncio import (
 
 from config import settings
 
-__all__ = ["make_engine", "make_sessionmaker", "session_scope", "get_engine"]
+__all__ = ["get_engine", "make_engine", "make_sessionmaker", "session_scope"]
 
 _engine: AsyncEngine | None = None
 _sessionmaker: async_sessionmaker[AsyncSession] | None = None
 
 
-def make_engine(url: str | None = None, **kwargs) -> AsyncEngine:
+def make_engine(url: str | None = None, **kwargs: Any) -> AsyncEngine:
     """Build an async engine.
 
     The pool is deliberately bounded with a short checkout timeout. A pool
@@ -33,7 +35,7 @@ def make_engine(url: str | None = None, **kwargs) -> AsyncEngine:
     timeout turns the same fault into a fast, legible error naming the
     caller that could not get a connection.
     """
-    options = {
+    options: dict[str, Any] = {
         "echo": settings.sql_echo,
         "pool_size": settings.pool_size,
         "max_overflow": settings.pool_max_overflow,

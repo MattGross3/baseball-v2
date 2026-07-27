@@ -6,6 +6,7 @@ exception text - a worker that dies mid-poll leaves evidence rather than
 silence, and a row still in `running` long after it started is how a hung
 process announces itself.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -13,15 +14,16 @@ import logging
 import traceback
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from typing import Any, cast
 
-from sqlalchemy import select, update
+from sqlalchemy import CursorResult, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.enums import IngestStatus
 from database.models import IngestRun
 from database.utc import utcnow
 
-__all__ = ["ingest_run", "reap_stale_runs", "STALE_RUN_AFTER"]
+__all__ = ["STALE_RUN_AFTER", "ingest_run", "reap_stale_runs"]
 
 log = logging.getLogger(__name__)
 
@@ -72,7 +74,9 @@ async def reap_stale_runs(
             error=REAPED_ERROR,
         )
     )
-    reaped = result.rowcount or 0
+    # `rowcount` is on CursorResult, which is what an UPDATE returns; the
+    # generic Result type does not declare it.
+    reaped = cast("CursorResult[Any]", result).rowcount or 0
     if reaped:
         log.warning(
             "Reaped %d ingest run(s) still marked running after %s - a worker "
@@ -156,9 +160,7 @@ async def ingest_run(
         # a fresh transaction - otherwise the crash that most needs recording
         # is the one that leaves no trace.
         await session.rollback()
-        detail = "".join(
-            traceback.format_exception(type(exc), exc, exc.__traceback__)
-        )
+        detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
         failed = IngestRun(
             source=source,
             run_kind=run_kind,

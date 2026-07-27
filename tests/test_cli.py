@@ -4,6 +4,7 @@ Parsing tests are pure. Operation tests use the plain async functions rather
 than shelling out, so a failure points at the logic instead of at a
 subprocess's exit code.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -36,7 +37,7 @@ H = dt.timedelta(hours=1)
 
 class TestParseAmerican:
     @pytest.mark.parametrize(
-        "text,expected",
+        ("text", "expected"),
         [("+130", 130), ("130", 130), ("-150", -150), (" -150 ", -150), ("+100", 100)],
     )
     def test_accepts_signed_and_unsigned(self, text, expected):
@@ -76,7 +77,7 @@ class TestNegativeOddsOnTheCommandLine:
 
 class TestParseStake:
     @pytest.mark.parametrize(
-        "text,cents",
+        ("text", "cents"),
         [
             ("50", 5000),
             ("50.00", 5000),
@@ -293,9 +294,7 @@ class TestSettleBet:
     async def test_explicit_payout_overrides(self, session):
         # What the book actually paid is the fact worth storing.
         bet = await self._open_bet(session)
-        settled = await settle_bet(
-            session, bet.id, BetStatus.WON, payout_cents=8334
-        )
+        settled = await settle_bet(session, bet.id, BetStatus.WON, payout_cents=8334)
         await session.commit()
         assert settled.payout_cents == 8334
 
@@ -366,16 +365,14 @@ class TestSnapshotAdd:
 
     async def test_all_prices_from_one_run_share_a_timestamp(self, session):
         # The property the opposing-side lookup depends on.
-        common = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-        )
-        async with ingest_run(
-            session, source="test", run_kind="odds_poll"
-        ) as poll:
+        common = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+        }
+        async with ingest_run(session, source="test", run_kind="odds_poll") as poll:
             for selection, odds in (("home", -130), ("away", 110)):
                 session.add(
                     OddsSnapshot(
@@ -399,16 +396,16 @@ class TestSnapshotAdd:
         existing row, so append-only holds. The second call returns None
         rather than raising or duplicating.
         """
-        args = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-            selection="away",
-            odds_american=130,
-            captured_at=FIRST_PITCH - H,
-        )
+        args = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+            "selection": "away",
+            "odds_american": 130,
+            "captured_at": FIRST_PITCH - H,
+        }
         first = await add_snapshot(session, **args)
         await session.commit()
         second = await add_snapshot(session, **args)
@@ -422,16 +419,16 @@ class TestSnapshotAdd:
     async def test_a_no_op_write_is_recorded_as_zero_rows(self, session):
         # The ingest run still happened; it just wrote nothing. Reporting 1
         # would make a retry storm look like real data collection.
-        args = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-            selection="away",
-            odds_american=130,
-            captured_at=FIRST_PITCH - H,
-        )
+        args = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+            "selection": "away",
+            "odds_american": 130,
+            "captured_at": FIRST_PITCH - H,
+        }
         await add_snapshot(session, **args)
         await session.commit()
         await add_snapshot(session, **args)
@@ -444,17 +441,15 @@ class TestSnapshotAdd:
         )
         assert [r.rows_written for r in runs] == [1, 0]
 
-    async def test_a_price_change_at_a_new_instant_is_a_new_observation(
-        self, session
-    ):
-        args = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-            selection="away",
-        )
+    async def test_a_price_change_at_a_new_instant_is_a_new_observation(self, session):
+        args = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+            "selection": "away",
+        }
         await add_snapshot(
             session, **args, odds_american=130, captured_at=FIRST_PITCH - 2 * H
         )
@@ -466,20 +461,18 @@ class TestSnapshotAdd:
         stored = (await session.execute(select(OddsSnapshot))).scalars().all()
         assert len(stored) == 2
 
-    async def test_an_unchanged_price_at_a_new_instant_is_still_recorded(
-        self, session
-    ):
+    async def test_an_unchanged_price_at_a_new_instant_is_still_recorded(self, session):
         # "We checked at T and it had not moved" is information, and the
         # unique key must not swallow it.
-        args = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-            selection="away",
-            odds_american=130,
-        )
+        args = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+            "selection": "away",
+            "odds_american": 130,
+        }
         await add_snapshot(session, **args, captured_at=FIRST_PITCH - 2 * H)
         await add_snapshot(session, **args, captured_at=FIRST_PITCH - H)
         await session.commit()
@@ -545,13 +538,13 @@ class TestEndToEnd:
         Numbers match tests/test_clv_math.py, arrived at here through the
         database and the CLI layer rather than passed straight in.
         """
-        common = dict(
-            game_pk=GAME_PK,
-            game_date=GAME_DATE,
-            commence_time_utc=FIRST_PITCH,
-            book="pinnacle",
-            market="moneyline",
-        )
+        common = {
+            "game_pk": GAME_PK,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "book": "pinnacle",
+            "market": "moneyline",
+        }
         # An opening price, a closing price, and the opposing closing price
         # so the no-vig metric is computable.
         await add_snapshot(

@@ -3,6 +3,7 @@
 Runs against its own scratch database, because upgrading and downgrading
 mutates the schema out from under anything else using it.
 """
+
 from __future__ import annotations
 
 import os
@@ -45,9 +46,7 @@ def scratch_url() -> Iterator[str]:
         conn.execute(f'DROP DATABASE IF EXISTS "{_SCRATCH_DB}" WITH (FORCE)')
         conn.execute(f'CREATE DATABASE "{_SCRATCH_DB}"')
 
-    yield make_url(base).set(database=_SCRATCH_DB).render_as_string(
-        hide_password=False
-    )
+    yield make_url(base).set(database=_SCRATCH_DB).render_as_string(hide_password=False)
 
     with psycopg.connect(admin, autocommit=True) as conn:
         conn.execute(f'DROP DATABASE IF EXISTS "{_SCRATCH_DB}" WITH (FORCE)')
@@ -68,9 +67,7 @@ def alembic_config(scratch_url: str) -> Iterator[Config]:
 
 
 def _tables(url: str) -> set[str]:
-    with psycopg.connect(
-        _dsn(url, make_url(url).database), autocommit=True
-    ) as conn:
+    with psycopg.connect(_dsn(url, make_url(url).database), autocommit=True) as conn:
         return {
             r[0]
             for r in conn.execute(
@@ -116,9 +113,7 @@ class TestOwnershipGuard:
     def test_refuses_a_database_containing_foreign_tables(
         self, alembic_config, scratch_url
     ):
-        with psycopg.connect(
-            _dsn(scratch_url, _SCRATCH_DB), autocommit=True
-        ) as conn:
+        with psycopg.connect(_dsn(scratch_url, _SCRATCH_DB), autocommit=True) as conn:
             conn.execute("CREATE TABLE games (id int primary key)")
             conn.execute("CREATE TABLE model_registry (id int primary key)")
 
@@ -159,20 +154,18 @@ class TestOwnershipGuard:
         """
         command.upgrade(alembic_config, "head")
 
-        with psycopg.connect(
-            _dsn(scratch_url, _SCRATCH_DB), autocommit=True
-        ) as conn:
-            version = conn.execute(
-                "SELECT version_num FROM alembic_version"
-            ).fetchone()
+        with psycopg.connect(_dsn(scratch_url, _SCRATCH_DB), autocommit=True) as conn:
+            version = conn.execute("SELECT version_num FROM alembic_version").fetchone()
             columns = conn.execute(
                 "SELECT count(*) FROM information_schema.columns "
                 "WHERE table_name = 'odds_snapshots'"
             ).fetchone()
 
         # The version table and the actual schema must agree.
-        assert version is not None and version[0] == "0001"
-        assert columns is not None and columns[0] > 0
+        assert version is not None
+        assert version[0] == "0001"
+        assert columns is not None
+        assert columns[0] > 0
 
 
 class TestModelMigrationParity:
@@ -204,9 +197,7 @@ class TestConstraintsSurviveMigration:
         # that tests happen to use.
         command.upgrade(alembic_config, "head")
 
-        with psycopg.connect(
-            _dsn(scratch_url, _SCRATCH_DB), autocommit=True
-        ) as conn:
+        with psycopg.connect(_dsn(scratch_url, _SCRATCH_DB), autocommit=True) as conn:
             names = {
                 r[0]
                 for r in conn.execute(
@@ -228,9 +219,7 @@ class TestConstraintsSurviveMigration:
         # A migration is a historical record that must keep running years
         # later. If it imported database.utc, renaming or deleting that
         # module would break already-applied history.
-        versions = os.path.join(
-            _PROJECT_ROOT, "database", "migrations", "versions"
-        )
+        versions = os.path.join(_PROJECT_ROOT, "database", "migrations", "versions")
         for name in os.listdir(versions):
             if not name.endswith(".py"):
                 continue

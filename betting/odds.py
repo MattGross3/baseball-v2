@@ -12,22 +12,23 @@ Sign convention for American odds:
     -150  stake 150 to win 100  (favorite)
     +130  stake 100 to win 130  (underdog)
 There is no such thing as odds of 0, and no valid price falls strictly
-between -100 and +100 - both sides of that gap describe the same thing, and
-+100 == -100 == even money. `validate_american` rejects the gap, which
-catches the common failure of a percentage or a units value being passed
-into an odds argument.
+between -100 and +100 - both sides of that gap describe the same thing,
+and +100 == -100 == even money. `validate_american` rejects the gap, which
+catches the common failure of a percentage or a units value reaching an
+odds argument.
 """
+
 from __future__ import annotations
 
 import math
 
 __all__ = [
-    "validate_american",
     "american_to_decimal",
-    "decimal_to_american",
     "american_to_implied_prob",
+    "decimal_to_american",
     "implied_prob_to_american",
     "profit_multiple",
+    "validate_american",
 ]
 
 
@@ -39,7 +40,9 @@ def validate_american(odds: int) -> int:
     by the range check, with a misleading message.
     """
     if isinstance(odds, bool) or not isinstance(odds, int):
-        raise ValueError(f"American odds must be an int, got {type(odds).__name__}: {odds!r}")
+        raise ValueError(
+            f"American odds must be an int, got {type(odds).__name__}: {odds!r}"
+        )
     if -100 < odds < 100:
         raise ValueError(
             f"{odds} is not a valid American price: no odds fall strictly between "

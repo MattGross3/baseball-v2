@@ -5,6 +5,7 @@ CHECK enforcement, TIMESTAMPTZ behaviour and NULL handling in btree indexes
 are all Postgres semantics; a SQLite run would report these as passing while
 proving nothing about what production actually rejects.
 """
+
 from __future__ import annotations
 
 import datetime as dt
@@ -18,7 +19,7 @@ from database.enums import BetStatus, IngestStatus
 from database.ingest_run import ingest_run
 from database.models import Bet, IngestRun, OddsSnapshot
 from database.utc import require_utc, utcnow
-from tests.conftest import FIRST_PITCH, GAME_DATE, make_bet, make_snapshot
+from tests.conftest import FIRST_PITCH, make_bet, make_snapshot
 
 pytestmark = pytest.mark.postgres
 
@@ -56,9 +57,7 @@ class TestTimeSemantics:
         await session.commit()
 
         stored = (await session.execute(select(OddsSnapshot))).scalars().one()
-        assert stored.captured_at == dt.datetime(
-            2026, 7, 27, 22, 55, tzinfo=dt.timezone.utc
-        )
+        assert stored.captured_at == dt.datetime(2026, 7, 27, 22, 55, tzinfo=dt.UTC)
 
     async def test_reads_back_utc_aware(self, session, run):
         session.add(make_snapshot(run, captured_at=FIRST_PITCH - H, odds=130))
@@ -76,7 +75,7 @@ class TestTimeSemantics:
         # This is the v1 project's live bug encoded as a test: its odds
         # ingest matched games on commence_time.date() (UTC), so late West
         # Coast games silently never matched and their prices were dropped.
-        commence = dt.datetime(2026, 7, 28, 5, 10, tzinfo=dt.timezone.utc)
+        commence = dt.datetime(2026, 7, 28, 5, 10, tzinfo=dt.UTC)
         venue_local_date = dt.date(2026, 7, 27)
 
         session.add(
@@ -190,9 +189,7 @@ class TestMarketConstraints:
     async def test_moneyline_may_not_have_over_under(self, session, run):
         await expect_rejected(
             session,
-            make_snapshot(
-                run, captured_at=FIRST_PITCH - H, odds=130, selection="over"
-            ),
+            make_snapshot(run, captured_at=FIRST_PITCH - H, odds=130, selection="over"),
         )
 
     async def test_unknown_market_rejected(self, session, run):
@@ -326,9 +323,7 @@ class TestBetConstraints:
 
 
 class TestAppendOnly:
-    async def test_identical_prices_at_different_times_both_persist(
-        self, session, run
-    ):
+    async def test_identical_prices_at_different_times_both_persist(self, session, run):
         # Asserts the ABSENCE of a unique constraint on the natural key.
         # An unchanged re-poll is a real observation - "we checked at T and
         # it had not moved" - and collapsing the two would destroy it.
@@ -369,9 +364,9 @@ class TestAppendOnly:
             )
         ).scalar_one()
         assert "NULLS NOT DISTINCT" in definition, definition
-        assert (
-            "(game_pk, market, selection, book, line, captured_at)" in definition
-        ), definition
+        assert "(game_pk, market, selection, book, line, captured_at)" in definition, (
+            definition
+        )
 
     async def test_moneyline_duplicate_is_actually_caught(self, session, run):
         # The behavioural half of the test above: moneyline rows carry
@@ -460,9 +455,7 @@ class TestIngestRunConstraints:
 class TestIngestRunContext:
     async def test_marks_success_and_records_rows(self, session):
         async with ingest_run(session, source="manual-cli", run_kind="manual") as r:
-            session.add(
-                make_snapshot(r, captured_at=FIRST_PITCH - H, odds=130)
-            )
+            session.add(make_snapshot(r, captured_at=FIRST_PITCH - H, odds=130))
             r.rows_written = 1
         await session.commit()
 
@@ -493,10 +486,13 @@ class TestIngestRunContext:
         class Boom(RuntimeError):
             pass
 
-        with pytest.raises(Boom):
+        async def poll_that_dies_halfway() -> None:
             async with ingest_run(session, source="manual-cli", run_kind="manual") as r:
                 session.add(make_snapshot(r, captured_at=FIRST_PITCH - H, odds=130))
                 raise Boom("failed halfway")
+
+        with pytest.raises(Boom):
+            await poll_that_dies_halfway()
 
         await session.rollback()
         # The rows written before the failure rolled back with it - a
@@ -509,10 +505,7 @@ class TestIndexesExist:
         names = set(
             (
                 await session.execute(
-                    text(
-                        "SELECT indexname FROM pg_indexes "
-                        "WHERE schemaname = 'public'"
-                    )
+                    text("SELECT indexname FROM pg_indexes WHERE schemaname = 'public'")
                 )
             )
             .scalars()
@@ -578,23 +571,26 @@ class TestNoGamesTable:
         # This test documents the absence so that adding one later is a
         # conscious change rather than a surprise.
         rows = (
-            await session.execute(
-                text(
-                    "SELECT conname FROM pg_constraint c "
-                    "JOIN pg_class t ON t.oid = c.conrelid "
-                    "WHERE c.contype = 'f' AND t.relname IN ('bets','odds_snapshots')"
+            (
+                await session.execute(
+                    text(
+                        "SELECT conname FROM pg_constraint c "
+                        "JOIN pg_class t ON t.oid = c.conrelid "
+                        "WHERE c.contype = 'f' "
+                        "AND t.relname IN ('bets','odds_snapshots')"
+                    )
                 )
             )
-        ).scalars().all()
+            .scalars()
+            .all()
+        )
         assert rows == ["fk_odds_snapshots_ingest_run"]
 
     async def test_only_three_tables_exist(self, session):
         names = set(
             (
                 await session.execute(
-                    text(
-                        "SELECT tablename FROM pg_tables WHERE schemaname = 'public'"
-                    )
+                    text("SELECT tablename FROM pg_tables WHERE schemaname = 'public'")
                 )
             )
             .scalars()

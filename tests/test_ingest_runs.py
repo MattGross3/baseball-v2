@@ -1,4 +1,5 @@
 """Ingest run lifecycle and the stale-run reaper."""
+
 from __future__ import annotations
 
 import datetime as dt
@@ -40,9 +41,7 @@ def _abandoned(*, age: dt.timedelta, source: str = "the-odds-api") -> IngestRun:
 
 
 class TestReaper:
-    async def test_reaps_a_run_that_outlived_any_plausible_execution(
-        self, session
-    ):
+    async def test_reaps_a_run_that_outlived_any_plausible_execution(self, session):
         session.add(_abandoned(age=dt.timedelta(hours=6)))
         await session.commit()
 

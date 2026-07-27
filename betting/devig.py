@@ -35,6 +35,7 @@ in `devig_power`).
 
 Everything here is pure: no I/O, no state, no configuration.
 """
+
 from __future__ import annotations
 
 import math
@@ -49,11 +50,11 @@ from betting.odds import (
 
 __all__ = [
     "DevigResult",
-    "overround",
-    "devig_power",
     "devig_american",
-    "fair_probability",
+    "devig_power",
     "fair_odds_american",
+    "fair_probability",
+    "overround",
 ]
 
 # Bounds on the exponent search. These are far outside anything a real market
