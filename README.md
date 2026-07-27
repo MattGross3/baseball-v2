@@ -138,6 +138,32 @@ Two test groups are worth knowing about:
   imports none of this code. No test asserts the implementation equals
   itself.
 
+## Secrets
+
+**There are none in this repository, and it must stay that way** — including
+in history, since a key committed once survives being deleted from HEAD.
+
+The only credential committed anywhere is `baseball:baseball`, which is the
+password of a throwaway local Docker container bound to localhost, and of the
+ephemeral service container in CI. It appears in `.env.example`, `ci.yml`,
+and as a `config.py` default. It is not a secret and grants access to
+nothing.
+
+Phase 1 introduces the first real one (`ODDS_API_KEY`). The pattern, before
+it arrives:
+
+- Real values live in `.env`, which is gitignored and must never be
+  committed. `.env.example` holds placeholders only.
+- CI reads them from GitHub Actions secrets, never from a file.
+- `config.py` exposes `has_*_key` booleans rather than the values, so a
+  health endpoint can report configuration without echoing it.
+- CI runs `gitleaks` over the **full history** on every push, not just the
+  diff.
+
+Before making this repository public, re-run the audit: confirm `.env` is
+untracked, that `git log -p --all` contains no key-shaped strings, and that
+the gitleaks job is green.
+
 ## Safety
 
 Two guards exist because this machine runs a second, unrelated PostgreSQL on
