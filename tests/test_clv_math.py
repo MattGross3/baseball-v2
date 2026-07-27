@@ -10,6 +10,7 @@ import datetime as dt
 import pytest
 
 from betting.clv import ClvResult, compute_clv, opposite_selection
+from betting.odds import american_to_implied_prob
 
 AT = dt.datetime(2026, 7, 27, 22, 55, tzinfo=dt.timezone.utc)
 
@@ -98,16 +99,58 @@ class TestDevigggedClv:
         ],
     )
     def test_devigged_positive_implies_price_positive(self, bet, close, opposing):
-        # The real invariant, and it runs one way only. Devigging lowers
-        # every probability, so the fair closing probability always sits
-        # below the raw one; a break-even beneath the fair number is
-        # necessarily beneath the raw number too. The converse fails
-        # whenever your improvement over the close is smaller than the
-        # book's margin - see the next test.
+        # The real invariant, and it runs one way only. For an OVERROUND
+        # book, devigging lowers every probability, so the fair closing
+        # probability sits below the raw one; a break-even beneath the fair
+        # number is necessarily beneath the raw number too. The converse
+        # fails whenever your improvement over the close is smaller than the
+        # book's margin - see test_price_clv_can_be_positive_while_devigged_
+        # is_negative.
+        #
+        # The overround guard is load-bearing, not defensive noise: an
+        # underround close solves to k < 1, devigging RAISES every
+        # probability, and the implication reverses. See
+        # test_invariant_reverses_for_an_underround_close.
         result = clv(bet, close, opposing=opposing)
         assert result.clv_prob_points is not None
-        if result.clv_prob_points > 0:
+        assert result.closing_overround is not None
+        if result.closing_overround > 0 and result.clv_prob_points > 0:
             assert result.clv_pct > 0
+
+    def test_invariant_reverses_for_an_underround_close(self):
+        """An arbitrage at the close inverts the relationship.
+
+        +105/+105 sums to 0.9756, so k < 1 and devigging raises both sides
+        instead of lowering them. The fair closing probability then sits
+        ABOVE the raw one, and `clv_prob_points > 0` no longer implies
+        `clv_pct > 0`. Rare, and usually a sign the two prices came from
+        different books or instants - but representable, so the invariant
+        has to be stated conditionally rather than absolutely.
+        """
+        # Bet at -110 (break-even 0.5238) into a close of +105/+105.
+        result = clv(-110, 105, opposing=105)
+
+        assert result.closing_overround is not None
+        assert result.closing_overround < 0  # underround: an arb
+        assert result.fair_closing_prob == pytest.approx(0.5, abs=1e-9)
+        # Fair (0.5) is ABOVE raw (0.4878) - the reverse of the normal case.
+        assert result.fair_closing_prob > american_to_implied_prob(105)
+
+        # Price CLV is negative: 1.91 held against a 2.05 close.
+        assert result.clv_pct < 0
+        # Devigged is also negative here, but only because the break-even is
+        # high; the point is that the proof of the implication does not hold
+        # in this regime, so nothing may rely on it.
+        assert result.clv_prob_points == pytest.approx(
+            (0.5 - american_to_implied_prob(-110)) * 100, abs=1e-6
+        )
+
+    def test_overround_is_reported(self):
+        result = clv(130, 140, opposing=-160)
+        assert result.closing_overround == pytest.approx(0.032051282, abs=1e-9)
+
+    def test_overround_is_none_without_the_opposing_price(self):
+        assert clv(130, 140).closing_overround is None
 
     def test_price_clv_can_be_positive_while_devigged_is_negative(self):
         # +200 taken on a market closing +180/-220. You beat the posted
@@ -125,8 +168,9 @@ class TestDevigggedClv:
 
     def test_fair_closing_prob_is_below_raw_closing_prob(self):
         # The mechanism behind the one-way implication, asserted directly.
-        from betting.odds import american_to_implied_prob
-
+        # All three closes here are overround; see
+        # test_invariant_reverses_for_an_underround_close for the other
+        # regime, where this relation flips.
         for close, opposing in [(140, -160), (180, -220), (-105, -105)]:
             result = clv(130, close, opposing=opposing)
             assert result.fair_closing_prob is not None

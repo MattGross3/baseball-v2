@@ -55,6 +55,24 @@ class TestNonWinningPayouts:
         for odds in (-2000, -150, 100, 1200):
             assert payout_cents(5000, odds, BetStatus.PUSH) == 5000
 
+    def test_postponed_returns_the_stake(self):
+        # A postponement returns the stake like a void, but is stored as its
+        # own status so "how many bets never graded because of weather" is
+        # answerable - which matters when judging whether a CLV sample is
+        # representative or quietly missing every rained-out slate.
+        assert payout_cents(5000, -150, BetStatus.POSTPONED) == 5000
+
+    def test_stake_only_statuses(self):
+        assert BetStatus.PUSH.returns_stake_only
+        assert BetStatus.VOID.returns_stake_only
+        assert BetStatus.POSTPONED.returns_stake_only
+        assert not BetStatus.WON.returns_stake_only
+        assert not BetStatus.LOST.returns_stake_only
+        assert not BetStatus.OPEN.returns_stake_only
+
+    def test_postponed_is_settled(self):
+        assert BetStatus.POSTPONED.is_settled
+
 
 class TestProfit:
     @pytest.mark.parametrize(

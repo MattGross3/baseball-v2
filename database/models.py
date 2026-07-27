@@ -329,7 +329,8 @@ class Bet(Base):
             "payout_cents IS NULL OR payout_cents >= 0", name="payout_nonneg"
         ),
         CheckConstraint(
-            "status IN ('open','won','lost','push','void')", name="status"
+            "status IN ('open','won','lost','push','void','postponed')",
+            name="status",
         ),
         # Makes "settled" mean one thing instead of three. Without it a row
         # can claim status='won' while carrying no settlement time and no

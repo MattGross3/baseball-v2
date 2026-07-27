@@ -59,7 +59,7 @@ key - it is a bare indexed integer until a schedule ingest exists to own it.
 
 Revision ID: 0001
 Revises: 
-Create Date: 2026-07-27 16:02:16.917858
+Create Date: 2026-07-27 16:07:33.426470
 """
 from __future__ import annotations
 
@@ -101,7 +101,7 @@ def upgrade() -> None:
     sa.CheckConstraint("(status = 'open' AND settled_at IS NULL AND payout_cents IS NULL) OR (status <> 'open' AND settled_at IS NOT NULL AND payout_cents IS NOT NULL)", name=op.f('ck_bets_settlement_coherent')),
     sa.CheckConstraint("market IN ('moneyline','total','run_line')", name=op.f('ck_bets_market')),
     sa.CheckConstraint("selection IN ('home','away','over','under')", name=op.f('ck_bets_selection')),
-    sa.CheckConstraint("status IN ('open','won','lost','push','void')", name=op.f('ck_bets_status')),
+    sa.CheckConstraint("status IN ('open','won','lost','push','void','postponed')", name=op.f('ck_bets_status')),
     sa.CheckConstraint('game_pk > 0', name=op.f('ck_bets_game_pk_positive')),
     sa.CheckConstraint('model_prob IS NULL OR (model_prob > 0 AND model_prob < 1)', name=op.f('ck_bets_model_prob_range')),
     sa.CheckConstraint('odds_american <= -100 OR odds_american >= 100', name=op.f('ck_bets_odds_american_valid')),

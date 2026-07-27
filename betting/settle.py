@@ -37,8 +37,8 @@ def payout_cents(stake_cents: int, odds_american: int, status: BetStatus | str) 
 
     if status is BetStatus.LOST:
         return 0
-    if status in (BetStatus.PUSH, BetStatus.VOID):
-        # Stake back, no profit either way.
+    if status.returns_stake_only:
+        # Push, void, postponed: stake back, no profit either way.
         return stake_cents
 
     # Won: stake + profit. Computed as stake * decimal_odds in one Decimal

@@ -383,7 +383,13 @@ class TestComputeClvForBet:
         # these, and raising would make the CLI unusable.
         assert await compute_clv_for_bet(session, bet.id) is None
 
-    async def test_require_settled_skips_open_bets(self, session, run):
+    async def test_open_bets_get_clv_without_waiting_for_settlement(
+        self, session, run
+    ):
+        # CLV is knowable the moment the game starts. Gating it on
+        # settlement would delay the only signal that converges fast, for no
+        # information gain - so there is deliberately no require_settled
+        # switch to forget to turn on.
         session.add(
             make_snapshot(
                 run, captured_at=FIRST_PITCH - 1 * H, odds=110, selection="away"
@@ -393,9 +399,61 @@ class TestComputeClvForBet:
         session.add(bet)
         await session.flush()
 
-        assert await compute_clv_for_bet(session, bet.id, require_settled=True) is None
-        # CLV is knowable at first pitch, so the default does not wait.
+        assert bet.status == "open"
         assert await compute_clv_for_bet(session, bet.id) is not None
+
+    async def test_reference_book_overrides_the_bet_book(self, session, run):
+        # A soft book's close is not an efficient price. Once multi-book
+        # ingest exists the yardstick should become a sharp reference, and
+        # that has to be a changed default rather than a refactor.
+        session.add_all(
+            [
+                make_snapshot(
+                    run,
+                    captured_at=FIRST_PITCH - 1 * H,
+                    odds=110,
+                    selection="away",
+                    book="draftkings",
+                ),
+                make_snapshot(
+                    run,
+                    captured_at=FIRST_PITCH - 1 * H,
+                    odds=125,
+                    selection="away",
+                    book="pinnacle",
+                ),
+            ]
+        )
+        bet = make_bet(odds=130, selection="away", book="draftkings")
+        session.add(bet)
+        await session.flush()
+
+        own = await compute_clv_for_bet(session, bet.id)
+        assert own is not None
+        assert own.closing_book == "draftkings"
+        assert own.closing_odds_american == 110
+
+        sharp = await compute_clv_for_bet(session, bet.id, reference_book="pinnacle")
+        assert sharp is not None
+        assert sharp.closing_book == "pinnacle"
+        assert sharp.closing_odds_american == 125
+        # Measured against the sharper close, the same bet looks worse.
+        assert sharp.clv_pct < own.clv_pct
+
+    async def test_reference_book_with_no_snapshot_returns_none(self, session, run):
+        session.add(
+            make_snapshot(
+                run, captured_at=FIRST_PITCH - 1 * H, odds=110, book="draftkings"
+            )
+        )
+        bet = make_bet(odds=130, book="draftkings")
+        session.add(bet)
+        await session.flush()
+
+        assert (
+            await compute_clv_for_bet(session, bet.id, reference_book="pinnacle")
+            is None
+        )
 
     async def test_unknown_bet_raises(self, session):
         with pytest.raises(LookupError, match="no bet with id"):

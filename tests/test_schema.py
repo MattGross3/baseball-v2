@@ -296,6 +296,14 @@ class TestBetConstraints:
         session.add(bet)
         await session.commit()
 
+    async def test_postponed_is_an_accepted_status(self, session):
+        bet = make_bet(odds=130)
+        bet.status = BetStatus.POSTPONED.value
+        bet.settled_at = utcnow()
+        bet.payout_cents = 5000  # stake returned
+        session.add(bet)
+        await session.commit()
+
     async def test_unknown_status_rejected(self, session):
         bet = make_bet(odds=130)
         bet.status = "cashed_out"

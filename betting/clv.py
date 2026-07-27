@@ -24,27 +24,37 @@ than being guessed at.
 
 HOW THE TWO RELATE
 ------------------
-They are not interchangeable and they do NOT always agree in sign. The
-implication runs one way only:
+They are not interchangeable and they do NOT always agree in sign. For a
+normal (overround) closing market the implication runs one way only:
 
-    clv_prob_points > 0  =>  clv_pct > 0        (always)
-    clv_pct > 0          =>  clv_prob_points > 0 (NOT always)
+    clv_prob_points > 0  =>  clv_pct > 0        (when overround > 0)
+    clv_pct > 0          =>  clv_prob_points > 0 (never guaranteed)
 
 Proof of the first: devigging an overround book lowers every probability, so
-the fair closing probability is always below the raw one. If your break-even
-is below the fair probability it is necessarily below the raw one too, which
-is exactly the condition for a positive price-based CLV.
+the fair closing probability sits below the raw one. If your break-even is
+below the fair probability it is necessarily below the raw one too, which is
+exactly the condition for a positive price-based CLV.
 
 The gap between them is the book's margin on your side. So a bet can beat
-the closing price and still be -EV against closing fair value - e.g. taking
-+200 on a market that closes +180/-220 is +7.14% price CLV but -0.22
-probability points, because a 20-cent improvement is not enough to cover a
-4.5% overround. That is a real distinction, not a data error: the first
-metric says you got a better number than the market's final posted price,
-the second says the market still thinks the bet is bad.
+the closing price and still be -EV against closing fair value - taking +200
+on a market that closes +180/-220 is +7.14% price CLV but -0.22 probability
+points, because a 20-cent improvement does not cover a 4.5% overround. That
+is a real distinction, not a data error: the first metric says you got a
+better number than the market's final posted price, the second says the
+market still thinks the bet is bad.
 
-`clv_prob_points` is therefore the stricter test, and the one to trust when
-they disagree.
+THE OVERROUND CONDITION IS NOT DECORATION. The proof depends on k > 1.
+An UNDERROUND closing market - the two sides summing to less than 1, i.e. a
+genuine arbitrage at the close - solves to k < 1, and then devigging RAISES
+every probability rather than lowering it. In that regime fair sits above
+raw and the implication reverses. It is rare, and it usually means the two
+closing prices came from different books or different instants, but it is
+representable and `devig_power` handles it deliberately (see its underround
+bracketing). Any code or test asserting the implication above must guard on
+`overround > 0` first.
+
+`clv_prob_points` is the stricter test, and the one to trust when they
+disagree.
 
 WHAT "CLOSING" MEANS HERE
 -------------------------
@@ -101,6 +111,15 @@ class ClvResult:
     fair_closing_prob: float | None
     bet_breakeven_prob: float
     beat_close: bool
+    # Overround of the closing market, or None when only one side was
+    # captured. Exposed because the relationship between the two CLV metrics
+    # only holds when this is positive - see the module docstring. A negative
+    # value means the close was an arbitrage, which in practice usually means
+    # the two prices came from different books or different instants.
+    closing_overround: float | None
+    # Which book's close this was measured against. Normally the book the bet
+    # was placed at; see `reference_book` on compute_clv_for_bet.
+    closing_book: str | None = None
 
 
 def opposite_selection(market: str, selection: str) -> str:
@@ -124,6 +143,7 @@ def compute_clv(
     closing_captured_at: dt.datetime,
     opposing_closing_odds_american: int | None = None,
     bet_id: int | None = None,
+    closing_book: str | None = None,
 ) -> ClvResult:
     """CLV arithmetic. PURE - no session, no I/O, no configuration.
 
@@ -145,6 +165,7 @@ def compute_clv(
 
     fair_closing_prob: float | None = None
     clv_prob_points: float | None = None
+    closing_overround: float | None = None
     if opposing_closing_odds_american is not None:
         validate_american(opposing_closing_odds_american)
         # Power method, never multiplicative - see betting/devig.py. Using
@@ -153,6 +174,7 @@ def compute_clv(
             [closing_odds_american, opposing_closing_odds_american]
         )
         fair_closing_prob = devigged.fair_probs[0]
+        closing_overround = devigged.overround
         clv_prob_points = (fair_closing_prob - bet_breakeven_prob) * 100.0
 
     return ClvResult(
@@ -167,6 +189,8 @@ def compute_clv(
         # Strictly greater: getting exactly the closing price is not beating
         # it.
         beat_close=clv_pct > 0.0,
+        closing_overround=closing_overround,
+        closing_book=closing_book,
     )
 
 
@@ -236,30 +260,36 @@ async def compute_clv_for_bet(
     session: AsyncSession,
     bet_id: int,
     *,
-    require_settled: bool = False,
+    reference_book: str | None = None,
 ) -> ClvResult | None:
     """CLV for a logged bet, or None if no closing price was ever captured.
 
     Returns None rather than raising for a missing close: early on there
-    will be plenty of bets with no snapshot behind them, and that is a
-    gap in the data, not an error.
+    will be plenty of bets with no snapshot behind them, and that is a gap
+    in the data, not an error.
 
-    `require_settled` is off by default. CLV is *reported* per settled bet,
-    but it is *knowable* the moment the game starts - waiting for
-    settlement only delays the signal that converges fastest.
+    CLV is computed as soon as a closing price exists. It is *reported* per
+    settled bet, but it is *knowable* the moment the game starts, and
+    waiting for settlement would delay the only signal that converges fast.
+
+    `reference_book` chooses whose close to measure against, defaulting to
+    the book the bet was placed at. That default is right for now but is not
+    the long-run standard: a soft book's close is not an efficient price, so
+    a sharp reference (Pinnacle, or a consensus) is the better yardstick
+    once multi-book ingest exists. Keeping it a parameter means that switch
+    is a changed default, not a refactor.
     """
     bet = await session.get(Bet, bet_id)
     if bet is None:
         raise LookupError(f"no bet with id {bet_id}")
-    if require_settled and not BetStatus(bet.status).is_settled:
-        return None
 
+    book = reference_book or bet.book
     closing = await find_closing_snapshot(
         session,
         game_pk=bet.game_pk,
         market=bet.market,
         selection=bet.selection,
-        book=bet.book,
+        book=book,
         line=bet.line,
         before=bet.commence_time_utc,
     )
@@ -278,4 +308,5 @@ async def compute_clv_for_bet(
             opposing.odds_american if opposing is not None else None
         ),
         bet_id=bet.id,
+        closing_book=closing.book,
     )

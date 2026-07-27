@@ -53,10 +53,21 @@ class BetStatus(StrEnum):
     LOST = "lost"
     PUSH = "push"
     VOID = "void"
+    # Distinct from VOID even though both return the stake. A postponement
+    # is a fact about the world, not a decision by the book, and separating
+    # them is what lets you ask how many bets never graded because of
+    # weather - which matters when judging whether a CLV sample is
+    # representative or quietly missing every rained-out slate.
+    POSTPONED = "postponed"
 
     @property
     def is_settled(self) -> bool:
         return self is not BetStatus.OPEN
+
+    @property
+    def returns_stake_only(self) -> bool:
+        """Statuses that give the stake back and nothing more."""
+        return self in (BetStatus.PUSH, BetStatus.VOID, BetStatus.POSTPONED)
 
 
 class IngestStatus(StrEnum):
