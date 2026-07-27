@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from logging.config import fileConfig
 
+import sqlalchemy as sa
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
@@ -62,6 +63,49 @@ def _database_url() -> str:
     )
 
 
+def assert_database_is_ours(connection) -> None:
+    """Refuse to migrate a database this project does not own.
+
+    THIS IS NOT PARANOIA. A native PostgreSQL install on the development
+    machine listens on 5432 and holds the v1 project's live database -
+    games, predictions, model_registry and a decade of ingested data. This
+    project's Postgres is on 5433. The two differ by one character in a URL,
+    and the failure mode is not an error: `alembic upgrade head` would
+    happily add three tables to v1's schema, and `alembic downgrade base`
+    would then drop them along with v1's alembic_version, leaving a live
+    database in a state nothing knows how to repair.
+
+    The test suite has its own guard, but that only protects the test path.
+    This one protects the path that would actually cause the damage: a
+    person at a terminal with a misconfigured .env. It lives in version
+    control rather than in someone's shell history.
+
+    The check is deliberately conservative: an empty database is fine (that
+    is a first migration), and a database containing only our own tables is
+    fine. Anything else stops.
+    """
+    inspector = sa.inspect(connection)
+    present = set(inspector.get_table_names())
+    if not present:
+        return  # virgin database; this is a first migration
+
+    ours = set(target_metadata.tables) | {"alembic_version"}
+    foreign = present - ours
+    if foreign:
+        url = connection.engine.url
+        raise SystemExit(
+            "\nREFUSING TO MIGRATE: this database is not ours.\n\n"
+            f"  target : {url.host}:{url.port}/{url.database}\n"
+            f"  found  : {', '.join(sorted(foreign))}\n\n"
+            "Those tables belong to another project. Migrating here could "
+            "destroy live data.\n"
+            "This project's database is on port 5433 "
+            "(docker compose up -d postgres); port 5432 on this machine is a "
+            "native PostgreSQL install holding the v1 project.\n"
+            "Check DATABASE_URL in your .env.\n"
+        )
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=_database_url(),
@@ -83,6 +127,20 @@ def run_migrations_online() -> None:
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
     )
+
+    # The ownership check runs on its OWN connection, which is then closed.
+    #
+    # This is not tidiness. Any query issued on the migration connection
+    # before `context.begin_transaction()` implicitly opens a transaction;
+    # Alembic then sees one already active, returns a no-op context manager
+    # instead of its own, and never commits. The migration appears to
+    # succeed - it logs "Running upgrade -> 0001" - and silently rolls back
+    # when the connection closes, leaving an empty database and an alembic
+    # version table that disagrees with reality.
+    #
+    # If you add another pre-flight check here, put it in this block too.
+    with connectable.connect() as probe:
+        assert_database_is_ours(probe)
 
     with connectable.connect() as connection:
         context.configure(

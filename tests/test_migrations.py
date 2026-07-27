@@ -103,6 +103,78 @@ class TestMigrationRoundTrip:
         assert {"bets", "odds_snapshots", "ingest_runs"} <= _tables(scratch_url)
 
 
+class TestOwnershipGuard:
+    """env.py must refuse to migrate a database this project does not own.
+
+    The scenario this exists for is real: a native PostgreSQL install on the
+    development machine listens on 5432 and holds the v1 project's live
+    data, while this project's Postgres is on 5433. One character in a URL
+    separates "migrate my scratch database" from "add three tables to a live
+    system and then drop them on the next downgrade".
+    """
+
+    def test_refuses_a_database_containing_foreign_tables(
+        self, alembic_config, scratch_url
+    ):
+        with psycopg.connect(
+            _dsn(scratch_url, _SCRATCH_DB), autocommit=True
+        ) as conn:
+            conn.execute("CREATE TABLE games (id int primary key)")
+            conn.execute("CREATE TABLE model_registry (id int primary key)")
+
+        with pytest.raises(SystemExit) as exc:
+            command.upgrade(alembic_config, "head")
+
+        message = str(exc.value)
+        assert "REFUSING TO MIGRATE" in message
+        assert "games" in message
+        assert "model_registry" in message
+        # And it must not have partially applied anything.
+        assert not ({"bets", "odds_snapshots"} & _tables(scratch_url))
+
+    def test_allows_an_empty_database(self, alembic_config, scratch_url):
+        # A virgin database is the normal case for a first migration.
+        command.upgrade(alembic_config, "head")
+        assert {"bets", "odds_snapshots", "ingest_runs"} <= _tables(scratch_url)
+
+    def test_allows_a_database_holding_only_our_tables(
+        self, alembic_config, scratch_url
+    ):
+        command.upgrade(alembic_config, "head")
+        command.downgrade(alembic_config, "base")
+        command.upgrade(alembic_config, "head")
+        assert {"bets", "odds_snapshots", "ingest_runs"} <= _tables(scratch_url)
+
+    def test_the_guard_does_not_swallow_the_migration_transaction(
+        self, alembic_config, scratch_url
+    ):
+        """Regression: the check must not run on the migration connection.
+
+        Any query on that connection before context.begin_transaction()
+        implicitly opens a transaction. Alembic then sees one active,
+        returns a no-op context manager instead of its own, and never
+        commits - so the migration logs "Running upgrade -> 0001", creates
+        nothing, and rolls back silently on close. This asserts the tables
+        genuinely exist afterwards rather than trusting the log line.
+        """
+        command.upgrade(alembic_config, "head")
+
+        with psycopg.connect(
+            _dsn(scratch_url, _SCRATCH_DB), autocommit=True
+        ) as conn:
+            version = conn.execute(
+                "SELECT version_num FROM alembic_version"
+            ).fetchone()
+            columns = conn.execute(
+                "SELECT count(*) FROM information_schema.columns "
+                "WHERE table_name = 'odds_snapshots'"
+            ).fetchone()
+
+        # The version table and the actual schema must agree.
+        assert version is not None and version[0] == "0001"
+        assert columns is not None and columns[0] > 0
+
+
 class TestModelMigrationParity:
     def test_models_match_migrations(self, alembic_config):
         """The highest-value test in this file.
