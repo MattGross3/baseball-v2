@@ -565,28 +565,33 @@ class TestIndexesExist:
         assert "WHERE (status = 'running'" in rows["ix_ingest_runs_running"]
 
 
-class TestNoGamesTable:
-    async def test_game_pk_carries_no_foreign_key(self, session):
-        # Deliberate for Phase 0: there is no games table to point at yet.
-        # This test documents the absence so that adding one later is a
-        # conscious change rather than a surprise.
-        rows = (
+class TestGamesOwnership:
+    async def test_game_pk_foreign_keys_restrict_deletes(self, session):
+        """Since 0002, game_pk FKs to games with ON DELETE RESTRICT.
+
+        Not CASCADE: nothing should ever delete a game, and if something
+        tries it must fail loudly rather than take the price history with
+        it. Observed prices cannot be re-fetched at any price.
+        """
+        rows = dict(
             (
                 await session.execute(
                     text(
-                        "SELECT conname FROM pg_constraint c "
+                        "SELECT conname, confdeltype::text FROM pg_constraint c "
                         "JOIN pg_class t ON t.oid = c.conrelid "
                         "WHERE c.contype = 'f' "
                         "AND t.relname IN ('bets','odds_snapshots')"
                     )
                 )
-            )
-            .scalars()
-            .all()
+            ).all()
         )
-        assert rows == ["fk_odds_snapshots_ingest_run"]
+        assert rows["fk_bets_game"] == "r"  # r = RESTRICT
+        assert rows["fk_odds_snapshots_game"] == "r"
+        # The ingest_run FK is deliberately NOT restrict-on-delete; it is
+        # provenance, not price history.
+        assert rows["fk_odds_snapshots_ingest_run"] == "a"
 
-    async def test_only_three_tables_exist(self, session):
+    async def test_expected_tables_exist(self, session):
         names = set(
             (
                 await session.execute(
@@ -596,4 +601,28 @@ class TestNoGamesTable:
             .scalars()
             .all()
         )
-        assert names == {"bets", "odds_snapshots", "ingest_runs", "alembic_version"}
+        assert names == {
+            "games",
+            "bets",
+            "odds_snapshots",
+            "ingest_runs",
+            "alembic_version",
+        }
+
+    async def test_games_uses_the_mlb_pk_directly(self, session):
+        # No surrogate id: game_pk is assigned by MLB and is the primary key.
+        pk_columns = (
+            (
+                await session.execute(
+                    text(
+                        "SELECT a.attname FROM pg_index i "
+                        "JOIN pg_attribute a ON a.attrelid = i.indrelid "
+                        " AND a.attnum = ANY(i.indkey) "
+                        "WHERE i.indrelid = 'games'::regclass AND i.indisprimary"
+                    )
+                )
+            )
+            .scalars()
+            .all()
+        )
+        assert pk_columns == ["game_pk"]

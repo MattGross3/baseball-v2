@@ -178,12 +178,15 @@ constraint, not a later optimisation.**
 
 The Odds API free tier is 500 credits/month account-wide, and **a credit is
 charged per market per region, not per request** — measured, not assumed:
-a single-market call returned `x-requests-last: 1`. Polling h2h + spreads +
-totals for the US region therefore costs **3 credits per poll**.
+a single-market call returned `x-requests-last: 1`.
 
-That is ~166 polls a month, or **5.5 per day** — not the ~16 an earlier
-version of this note assumed. Three times tighter. One request still returns
-every game in the slate, so the cost scales with markets, not with games.
+**Settled: h2h + totals, US region = 2 credits a poll.** That is ~250 polls a
+month, or **~8 a day**. One request still returns every game in the slate, so
+cost scales with markets, not with games.
+
+**Spreads is ruled out.** Adding it is a 50% cost increase (2 → 3 credits,
+~8/day → ~5.5/day) for a market nothing currently measures. Revisit only if
+run-line CLV becomes a question worth answering.
 
 The problem is what CLV means. A closing line is the price near first pitch,
 and MLB start times spread across roughly six hours. Sixteen evenly-spaced
@@ -193,20 +196,17 @@ lineup confirmations and steam land. A CLV series measured that way is not
 measuring the close; it is measuring a T−90min proxy and calling it the close.
 Every number this phase exists to produce would carry that bias, invisibly.
 
-At 5.5 polls a day, clustering is not an optimisation — it is the only way
+At ~8 polls a day, clustering is not an optimisation — it is the only way
 the number means anything. MLB start times bunch into a handful of clusters
 (roughly 13:05, 19:05/19:10, 20:10, 22:10 ET). Spending nearly the whole
 daily budget just before those clusters, and accepting almost no early
 coverage, is the trade: line-movement history is nice to have, a close is
 the thing being measured.
 
-Two levers if 5.5/day proves too tight:
-- **Drop to h2h only** (1 credit/poll → ~16 polls/day). Moneyline CLV is the
-  Phase 0 metric; spreads and totals are not yet used by anything.
-- Pay for a higher tier.
-
-Prefer the first until there is a reason not to. It is a configuration
-change, and it triples the resolution of the only market currently measured.
+One lever if ~8/day proves too tight: **drop to h2h only**, 1 credit a poll,
+~16 polls a day. Moneyline CLV is the metric Phase 0 actually measures; totals
+are collected because they are cheap alongside it, not because anything reads
+them yet. It is a one-line change to `MARKETS` in ingestion/odds.py.
 
 Two consequences to design in from the start, not bolt on:
 
@@ -221,6 +221,48 @@ Until that scheduler exists, any CLV computed from automatically-polled data
 should be read as approximate. CLV from hand-entered prices (the current
 `snapshot add` path) is exact, because the timestamps are whatever was
 actually observed.
+
+---
+
+## Our close is a SOFT close: six books, no Pinnacle
+
+The books returned for `regions=us`, observed on a live h2h+totals capture,
+2026-07-28:
+
+    betmgm, betonlineag, betrivers, betus, bovada,
+    draftkings, fanduel, lowvig, mybookieag
+
+**Nine, not six.** An earlier h2h-only sample returned six; the fuller
+request returns nine, so book coverage varies with the markets requested and
+six is not the ceiling. Coverage also varies per event - a game had prices
+from 2 books at one point and 9 at another - so "best price across books"
+means best of whoever quoted that game at that instant, not a fixed panel.
+
+**No Pinnacle, and no Circa.** Those are the sharp books whose closing line is
+the usual yardstick for "the market's honest final opinion". What we can
+measure is a soft close, and best-price-across-books means best of these six.
+
+Consequences, all of which bias the number in the same direction:
+
+- A soft book's close is less efficient than a sharp one, so beating it is
+  easier. CLV measured this way will read better than the same bets would
+  against Pinnacle.
+- Soft books move on their own customers, not only on information, so some of
+  the movement being measured is their book management rather than a
+  consensus converging.
+- `compute_clv_for_bet(reference_book=...)` already takes a parameter, so
+  switching yardsticks later is a changed default, not a refactor. But the
+  data has to exist first, and it does not.
+
+Not fixable inside this budget. Pinnacle is available on The Odds API's
+`eu`/`au` regions, which would cost an extra credit per market per region -
+doubling the poll cost to reach one book. Recorded rather than acted on.
+
+Whether nine is tier-limited could not be determined: the response carries
+no indication of what a higher tier would add, and the documentation does not
+enumerate per-tier coverage. What IS established is that the count varies
+with the markets requested and per event, so treat nine as an observation
+rather than a fixed roster.
 
 ---
 

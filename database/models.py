@@ -41,7 +41,7 @@ from database.base import Base
 from database.enums import BetStatus, IngestStatus
 from database.utc import UtcDateTime, utcnow
 
-__all__ = ["Bet", "IngestRun", "OddsSnapshot"]
+__all__ = ["Bet", "Game", "IngestRun", "OddsSnapshot"]
 
 # Reused across both tables that store a price. American odds are never 0 and
 # never fall strictly between -100 and +100; a value in that gap is a
@@ -151,6 +151,65 @@ class IngestRun(Base):
         return (
             f"IngestRun(id={self.id!r}, source={self.source!r}, "
             f"run_kind={self.run_kind!r}, status={self.status!r})"
+        )
+
+
+class Game(Base):
+    """One MLB game, keyed by StatsAPI's gamePk.
+
+    `game_pk` is the natural key and the primary key - no surrogate. It is
+    assigned by MLB, stable, and the thing every other table already refers
+    to.
+
+    THE PK IS STABLE ACROSS A POSTPONEMENT. StatsAPI does not mint a new
+    gamePk when a game is moved: pk 778431 was postponed on 2025-04-06 and
+    played on 2025-08-09 under the same pk, with game_date and
+    commence_time_utc updated in place. That is why there is no
+    `rescheduled_as` column - there is no successor row to point at - and
+    why bets and snapshots keep pointing at the right game for free.
+
+    `rescheduled_from_date` records where it moved FROM, which is the part
+    that would otherwise be lost. A twice-postponed game keeps only the most
+    recent origin; see docs/known-gaps.md.
+    """
+
+    __tablename__ = "games"
+    __table_args__ = (
+        CheckConstraint("game_pk > 0", name="game_pk_positive"),
+        # Slate queries: "what is on tonight".
+        Index("ix_games_game_date", "game_date"),
+        Index("ix_games_commence_time_utc", "commence_time_utc"),
+    )
+
+    # No autoincrement: this value comes from MLB, it is not ours to invent.
+    game_pk: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=False)
+
+    # Venue-LOCAL date, from StatsAPI officialDate. NEVER derived from
+    # commence_time_utc - see database/utc.py and ingestion/statsapi.py.
+    game_date: Mapped[dt.date] = mapped_column(Date)
+    commence_time_utc: Mapped[dt.datetime] = mapped_column(UtcDateTime)
+
+    home_team_id: Mapped[int] = mapped_column(Integer)
+    away_team_id: Mapped[int] = mapped_column(Integer)
+    # Resolves to an IANA timezone via ingestion.reference.VENUE_TIMEZONES.
+    venue_id: Mapped[int] = mapped_column(Integer)
+
+    # StatsAPI detailedState verbatim: Scheduled, Pre-Game, In Progress,
+    # Final, Postponed, Completed Early, Suspended, ... Deliberately
+    # unconstrained - enumerating a vocabulary owned by someone else, from an
+    # incomplete sample, buys a CHECK that rejects real data.
+    status: Mapped[str] = mapped_column(Text)
+
+    rescheduled_from_date: Mapped[dt.date | None] = mapped_column(Date, nullable=True)
+
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        UtcDateTime, default=utcnow, onupdate=utcnow, server_default=func.now()
+    )
+
+    def __repr__(self) -> str:  # pragma: no cover - debugging aid
+        return (
+            f"Game(game_pk={self.game_pk!r}, game_date={self.game_date!r}, "
+            f"status={self.status!r})"
         )
 
 
@@ -287,7 +346,10 @@ class OddsSnapshot(Base):
         BigInteger, ForeignKey("ingest_runs.id", name="fk_odds_snapshots_ingest_run")
     )
 
-    game_pk: Mapped[int] = mapped_column(Integer)
+    game_pk: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("games.game_pk", ondelete="RESTRICT", name="fk_odds_snapshots_game"),
+    )
     # The venue-LOCAL calendar date, from MLB StatsAPI's `officialDate`.
     # NEVER derive this from commence_time_utc.date(): a 10:10pm Pacific game
     # is 05:10 UTC the next day, so the UTC date is a different day. NOT NULL
@@ -387,7 +449,10 @@ class Bet(Base):
 
     id: Mapped[int] = mapped_column(BigInteger, primary_key=True)
 
-    game_pk: Mapped[int] = mapped_column(Integer)
+    game_pk: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("games.game_pk", ondelete="RESTRICT", name="fk_bets_game"),
+    )
     game_date: Mapped[dt.date] = mapped_column(Date)  # venue-local
     # The CLV cutoff: the closing line is the last price observed strictly
     # before this instant.

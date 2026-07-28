@@ -115,7 +115,9 @@ class TestOwnershipGuard:
         self, alembic_config, scratch_url
     ):
         with psycopg.connect(_dsn(scratch_url, _SCRATCH_DB), autocommit=True) as conn:
-            conn.execute("CREATE TABLE games (id int primary key)")
+            # v1 tables. NOT `games` - that is ours since migration 0002,
+            # and the guard is about tables this project does not own.
+            conn.execute("CREATE TABLE predictions (id int primary key)")
             conn.execute("CREATE TABLE model_registry (id int primary key)")
 
         with pytest.raises(SystemExit) as exc:
@@ -123,7 +125,7 @@ class TestOwnershipGuard:
 
         message = str(exc.value)
         assert "REFUSING TO MIGRATE" in message
-        assert "games" in message
+        assert "predictions" in message
         assert "model_registry" in message
         # And it must not have partially applied anything.
         assert not ({"bets", "odds_snapshots"} & _tables(scratch_url))
@@ -164,7 +166,7 @@ class TestOwnershipGuard:
 
         # The version table and the actual schema must agree.
         assert version is not None
-        assert version[0] == "0001"
+        assert version[0] == "0002"
         assert columns is not None
         assert columns[0] > 0
 
@@ -187,6 +189,13 @@ class TestDataLossGuard:
             conn.execute(
                 "INSERT INTO ingest_runs (source, run_kind, status, started_at,"
                 " finished_at) VALUES ('t','t','success', now(), now())"
+            )
+            # odds_snapshots.game_pk FKs to games since 0002.
+            conn.execute(
+                "INSERT INTO games (game_pk, game_date, commence_time_utc,"
+                " home_team_id, away_team_id, venue_id, status, updated_at)"
+                " VALUES (776543, DATE '2026-07-27', now(), 119, 137, 22,"
+                " 'Scheduled', now())"
             )
             conn.execute(
                 "INSERT INTO odds_snapshots (ingest_run_id, game_pk, game_date,"

@@ -29,6 +29,19 @@ class Settings(BaseSettings):
     )
     sql_echo: bool = False
 
+    # The Odds API. Empty means "not configured" - the poller refuses rather
+    # than erroring cryptically, and everything else still works.
+    odds_api_key: str = ""
+    odds_api_monthly_limit: int = 500
+    # Credits held back so a runaway cron cannot exhaust the period. The API
+    # charges per market per region, so a poll costs len(MARKETS) credits.
+    odds_api_safety_buffer: int = 50
+
+    @property
+    def has_odds_key(self) -> bool:
+        """Whether an odds key is configured. Never exposes the value."""
+        return bool(self.odds_api_key)
+
     # Connection pool. Carried over from the v1 project, which arrived at these
     # numbers after a long-running backtest held a connection open and made the
     # whole app look hung: a bounded pool with a short timeout turns that into

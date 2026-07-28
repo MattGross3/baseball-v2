@@ -12,3 +12,7 @@ build/
 dist/
 .idea/
 .vscode/
+
+# Raw API captures. Kept locally as the recovery path for parser bugs, but
+# not committed: they grow without bound and contain no logic.
+raw/

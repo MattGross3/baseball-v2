@@ -32,12 +32,19 @@ from sqlalchemy.engine import make_url
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
 from config import settings
+from database.base import Base
 from database.enums import IngestStatus
-from database.models import Bet, IngestRun, OddsSnapshot
+from database.models import Bet, Game, IngestRun, OddsSnapshot
 
 # Tables this project owns. Anything else in the target database means the
 # URL is pointing somewhere it should not be.
-_OUR_TABLES = {"bets", "odds_snapshots", "ingest_runs", "alembic_version"}
+_OUR_TABLES = {
+    "bets",
+    "odds_snapshots",
+    "ingest_runs",
+    "games",
+    "alembic_version",
+}
 
 _PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
@@ -193,9 +200,18 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
     from database.engine import make_sessionmaker
 
     async with engine.begin() as conn:
-        await conn.execute(
-            text("TRUNCATE bets, odds_snapshots, ingest_runs RESTART IDENTITY CASCADE")
-        )
+        # Every table, derived from the metadata rather than listed by hand -
+        # a new table that is not truncated leaks rows between tests, which
+        # surfaces as a failure in whichever test happens to run next rather
+        # than in the one that wrote them.
+        tables = ", ".join(Base.metadata.tables)
+        await conn.execute(text(f"TRUNCATE {tables} RESTART IDENTITY CASCADE"))
+
+        # Seed the games that snapshots and bets reference. Since migration
+        # 0002 both carry an FK to `games`, so a fixture row cannot exist
+        # without its game - which is the point of the constraint, and means
+        # the fixtures have to supply one.
+        await conn.execute(Game.__table__.insert(), _seed_games())
 
     factory = make_sessionmaker(engine)
     async with factory() as s:
@@ -211,6 +227,34 @@ async def session(engine: AsyncEngine) -> AsyncIterator[AsyncSession]:
 FIRST_PITCH = dt.datetime(2026, 7, 27, 23, 5, tzinfo=dt.UTC)
 GAME_DATE = dt.date(2026, 7, 27)
 GAME_PK = 776543
+
+
+# game_pks the fixtures and bulk-loading tests reference. GAME_PK is the
+# standard one; GAME_PK+1 is its doubleheader partner (same date, same
+# clubs, different pk); the block covers the 400 games the query-plan tests
+# spread rows across.
+_SEED_PK_RANGE = range(GAME_PK, GAME_PK + 400)
+_EXTRA_SEED_PKS = (900001,)
+
+
+def _seed_games() -> list[dict]:
+    """Rows for every game_pk the fixtures may reference.
+
+    Home/away are arbitrary but distinct, and the venue is Dodger Stadium so
+    that a test wanting the Pacific case has one available.
+    """
+    return [
+        {
+            "game_pk": pk,
+            "game_date": GAME_DATE,
+            "commence_time_utc": FIRST_PITCH,
+            "home_team_id": 119,
+            "away_team_id": 137,
+            "venue_id": 22,
+            "status": "Scheduled",
+        }
+        for pk in (*_SEED_PK_RANGE, *_EXTRA_SEED_PKS)
+    ]
 
 
 @pytest.fixture
