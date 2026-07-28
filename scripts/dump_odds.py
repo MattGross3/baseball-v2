@@ -61,13 +61,17 @@ def _api_key() -> str:
 
 
 def main() -> int:
-    url = BASE_URL + "?" + urllib.parse.urlencode(
-        {
-            "apiKey": _api_key(),
-            "regions": REGIONS,
-            "markets": MARKETS,
-            "oddsFormat": "american",
-        }
+    url = (
+        BASE_URL
+        + "?"
+        + urllib.parse.urlencode(
+            {
+                "apiKey": _api_key(),
+                "regions": REGIONS,
+                "markets": MARKETS,
+                "oddsFormat": "american",
+            }
+        )
     )
 
     try:
@@ -95,7 +99,9 @@ def main() -> int:
                 # The credit accounting belongs with the payload: a bare
                 # array on disk cannot say what it cost or what was left.
                 "headers": {
-                    k: v for k, v in headers.items() if k.lower().startswith("x-requests")
+                    k: v
+                    for k, v in headers.items()
+                    if k.lower().startswith("x-requests")
                 },
                 "events": json.loads(body),
             },

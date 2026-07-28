@@ -17,6 +17,13 @@ help:
 	@echo "test       - full suite (needs Postgres)"
 	@echo "test-fast  - pure-logic tests only, no database, no bulk fixtures"
 	@echo "verify     - everything CI runs"
+	@echo ""
+	@echo "capture    - one raw slate capture, no database (2 credits)"
+	@echo "schedule   - pull yesterday..tomorrow into games"
+	@echo "poll       - capture + parse + store snapshots (2 credits)"
+	@echo "replay     - re-parse every raw/ capture; spends nothing"
+	@echo "status     - ingest health, credits, close-proximity"
+	@echo "clv        - settled bets, coverage, realised P&L"
 
 PY := .venv/Scripts/python.exe
 
@@ -75,3 +82,31 @@ verify: lint typecheck check test
 clean:
 	rm -rf .pytest_cache .mypy_cache .ruff_cache htmlcov .coverage
 	find . -name __pycache__ -type d -not -path "./.venv/*" -exec rm -rf {} +
+
+# --- ingest ---------------------------------------------------------------
+
+# Standalone, stdlib only, no database. For capturing a slate before the
+# rest of the pipeline is ready to store it.
+capture:
+	$(PY) scripts/dump_odds.py
+
+schedule:
+	$(PY) -m ingestion schedule
+
+poll:
+	$(PY) -m ingestion poll
+
+# Costs nothing: re-parses captures already on disk. This is the recovery
+# path for a parser bug, which is why the poller writes raw before parsing.
+replay:
+	$(PY) -m ingestion.replay
+
+# --- reporting ------------------------------------------------------------
+# psql inside the container, so no local client is needed. The only
+# interface for now: no dashboard.
+
+status:
+	@docker exec -i baseballv2-postgres-1 psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/status.sql
+
+clv:
+	@docker exec -i baseballv2-postgres-1 psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/clv.sql

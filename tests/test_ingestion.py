@@ -21,10 +21,14 @@ from database.ingest_run import ingest_run
 from database.models import Game, IngestRun, OddsSnapshot
 from ingestion.odds import (
     MARKETS,
+    AmbiguousGame,
     UnknownGame,
     _game_dates,
+    _remaining_credits,
+    budget_gate,
     load_game_index,
     parse_capture,
+    remaining_start_clusters,
     store_snapshots,
 )
 from ingestion.schedule import game_values
@@ -90,7 +94,7 @@ def _event_for(home: str, away: str, commence: str) -> dict:
 class TestParseCapture:
     def test_parses_a_real_slate(self):
         capture = _capture(SLATE)
-        rows = parse_capture(capture, _index_for(SLATE))
+        rows, _ = parse_capture(capture, _index_for(SLATE))
 
         assert rows, "real slate produced no rows"
         # Every row must be storable: the schema's CHECK constraints are the
@@ -107,7 +111,7 @@ class TestParseCapture:
     def test_records_every_book_returned(self):
         # No bookmakers filter: whatever the API gives us is stored. Best
         # price across books is only possible if every book is kept.
-        rows = parse_capture(_capture(SLATE), _index_for(SLATE))
+        rows, _ = parse_capture(_capture(SLATE), _index_for(SLATE))
         books = {r["book"] for r in rows}
         assert len(books) >= 5, books
         assert "draftkings" in books
@@ -117,7 +121,7 @@ class TestParseCapture:
         # The failure that would invert every CLV number while looking
         # entirely normal.
         event = SLATE[0]
-        rows = parse_capture(_capture([event]), _index_for([event]))
+        rows, _ = parse_capture(_capture([event]), _index_for([event]))
         ml = [r for r in rows if r["market"] == "moneyline"]
 
         raw = {
@@ -142,12 +146,6 @@ class TestParseCapture:
         with pytest.raises(KeyError, match="no MLB team id"):
             parse_capture(_capture([event]), _index_for(SLATE))
 
-    def test_unresolvable_game_raises_rather_than_dropping(self):
-        # v1 logged this at debug and moved on, losing that game's prices
-        # silently. It must be loud.
-        with pytest.raises(UnknownGame, match="no game for"):
-            parse_capture(_capture([SLATE[0]]), {})
-
     def test_a_night_game_resolves_to_the_previous_local_date(self):
         # A 7pm Pacific first pitch is 02:00 UTC tomorrow; the game belongs
         # to today's slate. The index is keyed on venue-local game_date.
@@ -161,7 +159,7 @@ class TestParseCapture:
                 resolve_team_id(event["away_team"]),
             ): [(dt.datetime(2026, 7, 28, 2, 10, tzinfo=UTC), 800999)]
         }
-        rows = parse_capture(_capture([event]), index)
+        rows, _ = parse_capture(_capture([event]), index)
         assert rows
         assert {r["game_pk"] for r in rows} == {800999}
 
@@ -176,7 +174,7 @@ class TestParseCapture:
                     ],
                 }
             )
-        rows = parse_capture(_capture([event]), _index_for([event]))
+        rows, _ = parse_capture(_capture([event]), _index_for([event]))
         assert all(r["market"] != "run_line" for r in rows)
 
 
@@ -315,7 +313,7 @@ class TestGameIndexAndStorage:
         game_one = _event_for(
             "Cincinnati Reds", "Cleveland Guardians", "2026-07-28T17:41:00Z"
         )
-        rows = parse_capture(_capture([game_one]), index)
+        rows, _ = parse_capture(_capture([game_one]), index)
         assert rows, "no rows parsed"
         assert {r["game_pk"] for r in rows} == {824490}, "game one filed wrongly"
 
@@ -323,8 +321,66 @@ class TestGameIndexAndStorage:
         game_two = _event_for(
             "Cincinnati Reds", "Cleveland Guardians", "2026-07-28T23:12:00Z"
         )
-        rows = parse_capture(_capture([game_two]), index)
+        rows, _ = parse_capture(_capture([game_two]), index)
         assert {r["game_pk"] for r in rows} == {824489}, "game two filed wrongly"
+
+    async def test_an_ambiguous_doubleheader_raises_rather_than_picking(self, session):
+        """Two candidates inside the window: refuse, do not choose.
+
+        Picking the nearest is how one game's prices get filed against the
+        other, and nothing downstream can detect it - the rows look
+        entirely normal. A raise costs one slate's prices for that game and
+        is visible in ingest_runs; a wrong guess costs the integrity of
+        every CLV number computed from it, silently.
+        """
+        date = dt.date(2026, 7, 28)
+        # A traditional doubleheader: the nightcap follows closely enough
+        # that both games sit inside MATCH_TOLERANCE.
+        await self._game(
+            session,
+            pk=824495,
+            home=113,
+            away=114,
+            date=date,
+            commence=dt.datetime(2026, 7, 28, 17, 40, tzinfo=UTC),
+        )
+        await self._game(
+            session,
+            pk=824496,
+            home=113,
+            away=114,
+            date=date,
+            commence=dt.datetime(2026, 7, 28, 18, 30, tzinfo=UTC),
+        )
+        index = await load_game_index(session, date)
+
+        event = _event_for(
+            "Cincinnati Reds", "Cleveland Guardians", "2026-07-28T18:00:00Z"
+        )
+        with pytest.raises(AmbiguousGame, match="Refusing to guess"):
+            parse_capture(_capture([event]), index)
+
+    async def test_the_ambiguity_message_names_both_candidates(self, session):
+        # So the failure in ingest_runs says which games it could not
+        # separate, rather than only that it could not.
+        date = dt.date(2026, 7, 28)
+        for pk, hour in ((824497, 17), (824498, 18)):
+            await self._game(
+                session,
+                pk=pk,
+                home=113,
+                away=114,
+                date=date,
+                commence=dt.datetime(2026, 7, 28, hour, 40, tzinfo=UTC),
+            )
+        index = await load_game_index(session, date)
+        event = _event_for(
+            "Cincinnati Reds", "Cleveland Guardians", "2026-07-28T18:00:00Z"
+        )
+        with pytest.raises(AmbiguousGame) as exc:
+            parse_capture(_capture([event]), index)
+        assert "824497" in str(exc.value)
+        assert "824498" in str(exc.value)
 
     async def test_a_wildly_wrong_start_time_does_not_match(self, session):
         # Better to raise than to file prices against a game that merely
@@ -343,8 +399,11 @@ class TestGameIndexAndStorage:
         event = _event_for(
             "Cincinnati Reds", "Cleveland Guardians", "2026-07-29T17:40:00Z"
         )  # a day out
-        with pytest.raises(UnknownGame):
-            parse_capture(_capture([event]), index)
+        rows, unresolved = parse_capture(_capture([event]), index)
+        # No wrong price written, and the miss is named rather than silent.
+        assert rows == []
+        assert len(unresolved) == 1
+        assert "Cincinnati Reds" in unresolved[0]
 
     async def test_store_snapshots_writes_and_is_idempotent(self, session):
         date = dt.date(2026, 7, 27)
@@ -502,3 +561,147 @@ class TestFailuresAreVisible:
         assert run.status == IngestStatus.FAILED.value
         assert "no game for" in run.error
         assert run.finished_at is not None
+
+
+@pytest.mark.postgres
+class TestBudgetGate:
+    """The floor is what the rest of the day needs, not a fixed number.
+
+    A closing line is the only price this project measures, so credits have
+    to be reserved for the first pitches still ahead. A flat floor would let
+    a quiet morning drain what the evening slate needs.
+    """
+
+    async def _game_at(self, session, pk, commence):
+        session.add(
+            Game(
+                game_pk=pk,
+                game_date=commence.date(),
+                commence_time_utc=commence,
+                home_team_id=147,
+                away_team_id=145,
+                venue_id=22,
+                status="Scheduled",
+            )
+        )
+        await session.commit()
+
+    async def test_clusters_group_nearby_first_pitches(self, session):
+        now = dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        # Two games five minutes apart are one cluster; the evening game is
+        # a second. One poll captures every game in flight at that moment.
+        await self._game_at(session, 830001, now + dt.timedelta(hours=5))
+        await self._game_at(session, 830002, now + dt.timedelta(hours=5, minutes=5))
+        await self._game_at(session, 830003, now + dt.timedelta(hours=10))
+
+        clusters = await remaining_start_clusters(
+            session, now=now, horizon=dt.timedelta(hours=24)
+        )
+        assert clusters == 2
+
+    async def test_past_first_pitches_are_not_reserved_for(self, session):
+        now = dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        await self._game_at(session, 830004, now - dt.timedelta(hours=2))
+        assert (
+            await remaining_start_clusters(
+                session, now=now, horizon=dt.timedelta(hours=24)
+            )
+            == 0
+        )
+
+    async def test_refuses_when_the_rest_of_the_day_needs_the_credits(self, session):
+        now = dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        for offset, pk in enumerate((830005, 830006, 830007), start=1):
+            await self._game_at(session, pk, now + dt.timedelta(hours=offset * 3))
+
+        # 3 clusters x 2 credits = 6 reserved; spending 2 more would leave 5.
+        allowed, reason = await budget_gate(session, remaining=7, now=now)
+        assert allowed is False
+        assert "Holding back" in reason
+        assert "3 first-pitch cluster" in reason
+
+    async def test_spends_when_there_is_room(self, session):
+        now = dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        await self._game_at(session, 830008, now + dt.timedelta(hours=3))
+        allowed, reason = await budget_gate(session, remaining=400, now=now)
+        assert allowed is True
+        assert "spending" in reason
+
+    async def test_first_ever_poll_is_allowed(self, session):
+        # No prior poll means no recorded remaining count; refusing here
+        # would mean the poller could never start.
+        allowed, _ = await budget_gate(
+            session, remaining=None, now=dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        )
+        assert allowed is True
+
+    async def test_an_explicit_floor_overrides_the_derived_one(self, session):
+        now = dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC)
+        await self._game_at(session, 830009, now + dt.timedelta(hours=3))
+        allowed, _ = await budget_gate(session, remaining=100, now=now, floor=200)
+        assert allowed is False
+
+
+@pytest.mark.postgres
+class TestRemainingCredits:
+    async def test_ignores_the_current_run(self, session):
+        """The gate must not read its own row.
+
+        `ingest_run` commits the run before the body executes, so the
+        current poll is already the most recent odds_poll row - and it has
+        no remaining_after yet. Without excluding it, this always returned
+        None and the budget gate always allowed the spend while logging
+        "no prior poll recorded" as though that were a finding.
+        """
+        from database.models import IngestRun
+
+        previous = IngestRun(
+            source="the-odds-api",
+            run_kind="odds_poll",
+            status=IngestStatus.SUCCESS.value,
+            started_at=dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+            finished_at=dt.datetime(2026, 7, 28, 12, 0, tzinfo=UTC),
+            params={"remaining_after": "412"},
+        )
+        session.add(previous)
+        await session.commit()
+
+        async with ingest_run(
+            session, source="the-odds-api", run_kind="odds_poll"
+        ) as current:
+            # Without the exclusion this finds `current` and returns None.
+            assert await _remaining_credits(session, exclude_run_id=current.id) == 412
+            current.rows_written = 0
+        await session.commit()
+
+    async def test_none_when_no_prior_poll_recorded_credits(self, session):
+        assert await _remaining_credits(session) is None
+
+    async def test_skips_runs_that_never_recorded_a_count(self, session):
+        # A failed poll writes no remaining_after; the gate must fall back
+        # to the last run that did rather than treating it as unknown.
+        from database.models import IngestRun
+
+        session.add_all(
+            [
+                IngestRun(
+                    source="the-odds-api",
+                    run_kind="odds_poll",
+                    status=IngestStatus.SUCCESS.value,
+                    started_at=dt.datetime(2026, 7, 28, 10, 0, tzinfo=UTC),
+                    finished_at=dt.datetime(2026, 7, 28, 10, 0, tzinfo=UTC),
+                    params={"remaining_after": "400"},
+                ),
+                IngestRun(
+                    source="the-odds-api",
+                    run_kind="odds_poll",
+                    status=IngestStatus.FAILED.value,
+                    started_at=dt.datetime(2026, 7, 28, 11, 0, tzinfo=UTC),
+                    finished_at=dt.datetime(2026, 7, 28, 11, 0, tzinfo=UTC),
+                    error="upstream 503",
+                    params={},
+                ),
+            ]
+        )
+        await session.commit()
+        assert await _remaining_credits(session) == 400

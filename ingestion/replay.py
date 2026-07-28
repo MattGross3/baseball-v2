@@ -62,7 +62,7 @@ async def replay_capture(session: AsyncSession, path: pathlib.Path) -> int:
         # Index around the capture's own date, not today's - an old capture
         # must resolve against the games that existed then.
         index = await load_game_index(session, captured_at.date())
-        rows = parse_capture(capture, index)
+        rows, unresolved = parse_capture(capture, index)
         game_dates = await _game_dates(session, {r["game_pk"] for r in rows})
         written = await store_snapshots(
             session,
@@ -72,6 +72,8 @@ async def replay_capture(session: AsyncSession, path: pathlib.Path) -> int:
             game_dates=game_dates,
         )
         run.rows_written = written
+        if unresolved:
+            run.params = {**run.params, "unresolved": unresolved}
         # No API call: this spends nothing.
         run.api_requests = 0
 
