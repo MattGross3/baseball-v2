@@ -111,7 +111,7 @@ observation and is kept.
 ```
 betting/     odds, devigging, CLV, settlement, CLI
 database/    models, async engine, UTC type, Alembic migrations
-tests/       327 tests; pure-logic tests need no database
+tests/       340 tests; pure-logic tests need no database
 docs/        phase-0 plan, known gaps
 ```
 

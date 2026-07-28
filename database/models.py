@@ -93,6 +93,15 @@ class IngestRun(Base):
         CheckConstraint(
             "status <> 'failed' OR error IS NOT NULL", name="failed_has_error"
         ),
+        # The mirror of the above, and it is not symmetry for its own sake.
+        # A long run can be reaped by another process while it is still
+        # working; when it then completes, it writes status='success' over
+        # the reaped row. Without this, the error text from the reap survives
+        # on a successful run and there is nothing to catch it - the run
+        # reads as healthy while carrying a message saying it died.
+        CheckConstraint(
+            "status <> 'success' OR error IS NULL", name="success_has_no_error"
+        ),
         # "When did odds last poll successfully?" - the health question a
         # scheduler asks constantly - in one index seek.
         Index("ix_ingest_runs_source_started", "source", "started_at"),
@@ -127,6 +136,14 @@ class IngestRun(Base):
         JSONB, default=dict, server_default=text("'{}'::jsonb")
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    # The Postgres backend pid that opened this run, from pg_backend_pid().
+    # Lets the reaper ask whether the process is actually gone instead of
+    # inferring it from a wall-clock timeout - see database/ingest_run.py.
+    # Nullable because a writer that does not hold a connection for the
+    # run's duration cannot supply a meaningful one, and because rows
+    # predating this column have none.
+    backend_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
     snapshots: Mapped[list[OddsSnapshot]] = relationship(back_populates="ingest_run")
 
@@ -219,10 +236,18 @@ class OddsSnapshot(Base):
         # to match a predicate - see betting/clv.py::find_closing_snapshot.
         # `IS NOT DISTINCT FROM` matches neither and is not indexable at all.
         #
-        # `id` trails captured_at because the query breaks ties on it, so two
-        # prices stamped at the identical instant resolve the same way on
-        # every call. Without it the ORDER BY is only partly satisfied and
-        # Postgres bolts on an Incremental Sort.
+        # `id` IS NOT DEAD WEIGHT - do not remove it from either index.
+        #
+        # The query is ORDER BY captured_at DESC, id DESC. Drop `id` and
+        # Postgres adds an Incremental Sort: it will NOT infer from the
+        # observation-uniqueness constraint that captured_at is already
+        # unique within a key, so it cannot prove the second sort key is a
+        # no-op. That breaks the no-Sort assertion in TestIndexUsage.
+        #
+        # Dropping it from the index therefore means dropping it from the
+        # ORDER BY too - at which point determinism depends on that
+        # constraint continuing to hold, which is a worse trade. 16 bytes a
+        # row across two indexes is ~160MB at 10M rows.
         #
         # Declared ASC deliberately: Postgres scans a btree backward at the
         # same cost as forward, so a DESC declaration would buy nothing while

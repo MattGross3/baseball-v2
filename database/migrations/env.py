@@ -107,7 +107,90 @@ def assert_database_is_ours(connection: sa.Connection) -> None:
         )
 
 
+def assert_no_data_loss(connection: sa.Connection) -> None:
+    """Refuse a downgrade that would destroy observed prices.
+
+    The ownership guard above protects against migrating somebody else's
+    database. That was the right check for the collision it was written for,
+    and that collision is now a solved, historical problem. From Phase 1 the
+    catastrophic path is `alembic downgrade base` against OUR OWN database
+    holding a week of odds_snapshots - and the ownership guard waves that
+    through, because the tables are, correctly, ours.
+
+    Observed prices are the one thing in this system that cannot be
+    re-fetched at any price. A game can be re-ingested, features recomputed,
+    models retrained; the price a book showed at 22:55 on a Tuesday is gone
+    the moment it is dropped. Historical odds are a paid add-on that only
+    goes back so far, and not at per-minute resolution.
+
+    Override with `-x allow_data_loss=1` when the destruction is intended.
+    """
+    if "allow_data_loss" in context.get_x_argument(as_dictionary=True):
+        return
+
+    try:
+        count = connection.execute(
+            sa.text("SELECT count(*) FROM odds_snapshots")
+        ).scalar_one()
+    except sa.exc.DatabaseError:
+        # Table does not exist yet - nothing to lose.
+        return
+
+    if count:
+        raise SystemExit(
+            f"\nREFUSING TO DOWNGRADE: odds_snapshots holds {count:,} observed "
+            "price(s).\n\n"
+            "Dropping this table destroys observations that cannot be "
+            "re-fetched. Unlike games, features or model output, a price a "
+            "book showed at a particular instant is gone once deleted - "
+            "historical odds are a paid add-on and do not go back at "
+            "per-minute resolution.\n\n"
+            "If you genuinely mean it:\n"
+            "    alembic -x allow_data_loss=1 downgrade <target>\n"
+        )
+
+
+def _is_downgrade() -> bool:
+    """Whether this invocation moves the schema backwards.
+
+    Alembic has no public "which direction" accessor, but both
+    `command.upgrade` and `command.downgrade` pass an inner function of that
+    exact name as `fn=` to `context.configure`, so the migration context's
+    `_migrations_fn.__name__` says which one ran. That holds whether Alembic
+    was invoked from the command line or programmatically, which matters:
+    the tests call `command.downgrade` directly and would sail past a check
+    that only inspected sys.argv.
+
+    Only valid AFTER `context.configure()`. Using a private attribute is a
+    real cost - it can break on an Alembic upgrade - so a test asserts the
+    downgrade guard actually fires, which is what would catch that.
+    """
+    fn = getattr(context.get_context(), "_migrations_fn", None)
+    return getattr(fn, "__name__", "") == "downgrade"
+
+
 def run_migrations_offline() -> None:
+    """Emit SQL rather than executing it.
+
+    Guarded too, despite executing nothing. `alembic upgrade head --sql |
+    psql` is a normal thing to do, and the guard's whole justification is the
+    human-at-a-terminal path - which this is, one pipe later. Offline mode
+    has no connection, so the ownership check cannot run; refuse instead to
+    emit a downgrade script without the explicit flag.
+    """
+    if _is_downgrade() and "allow_data_loss" not in context.get_x_argument(
+        as_dictionary=True
+    ):
+        raise SystemExit(
+            "\nREFUSING TO EMIT A DOWNGRADE SCRIPT.\n\n"
+            "Offline mode has no connection, so this cannot check whether the "
+            "target database holds observed prices - and piping the result "
+            "into psql would destroy them without ever asking.\n\n"
+            "Run the downgrade online so the guard can inspect the database, "
+            "or if you genuinely mean it:\n"
+            "    alembic -x allow_data_loss=1 downgrade <target> --sql\n"
+        )
+
     context.configure(
         url=_database_url(),
         target_metadata=target_metadata,
@@ -157,6 +240,15 @@ def run_migrations_online() -> None:
             compare_server_default=False,
             render_item=render_item,
         )
+
+        # Direction is only knowable after configure(). The data-loss check
+        # gets its own connection for the same reason the ownership check
+        # does: querying the migration connection here would open a
+        # transaction and Alembic would then skip its own commit.
+        if _is_downgrade():
+            with connectable.connect() as probe:
+                assert_no_data_loss(probe)
+
         with context.begin_transaction():
             context.run_migrations()
 

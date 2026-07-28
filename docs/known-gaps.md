@@ -78,15 +78,36 @@ recomputation is possible.
 
 ---
 
-## The reaper's once-per-process latch is coarse
+## The reaper judges liveness by pid, which is single-node only
 
-`reap_stale_runs_once` fires on the first `ingest_run()` in a process and
-never again. A run abandoned *later in the same long-lived process* is not
-reaped until the next process start.
+`reap_stale_runs` asks `pg_stat_activity` whether the backend that opened a
+run still exists. That is evidence, where a wall-clock timeout is only
+inference — but it rests on two assumptions, both violable:
 
-Fine for a CLI, where a process is one command. When a long-running scheduler
-exists it should call `reap_stale_runs` on its own timer instead of relying
-on the latch.
+- **A run holds its connection for its duration.** True under
+  `session_scope()`. A future writer that commits, releases the connection,
+  and later picks up a different one could have its recorded pid go stale
+  while it is alive. `PID_REAP_GRACE` (5 min) is the guard: no run is reaped
+  on pid evidence until at least that old, so ordinary pool churn cannot
+  produce a false positive.
+
+- **Pids are per-server.** A run started against this database from a
+  *different host* has a pid meaningful only on that host, and the query
+  would judge it against the wrong machine's process table — potentially
+  marking a healthy run failed. Correct for single-node, wrong the moment
+  there are two.
+
+When a second host appears, either add a host column and compare on
+`(host, pid)`, or switch to a Postgres advisory lock held for the run's
+duration, which is host-agnostic and releases automatically on disconnect.
+
+The age-based path (`STALE_RUN_AFTER`, 1 hour) remains as a fallback for
+rows with no `backend_pid`.
+
+`_is_downgrade()` in `migrations/env.py` also reads a private Alembic
+attribute (`_migrations_fn.__name__`) because there is no public accessor for
+migration direction. It can break on an Alembic upgrade; the downgrade-guard
+tests are what would catch it.
 
 ---
 
@@ -112,6 +133,61 @@ At Phase 0 volumes this is irrelevant. Revisit around 10M rows, when
 `captured_at` range partitioning becomes worth the complexity. The
 point-in-time indexes are prefixed by `game_pk`, so partitioning by time
 would need thought about whether it helps or hurts them.
+
+---
+
+## The poll budget will bias CLV unless the schedule is weighted
+
+**Decided: weight the schedule toward first pitch. Phase 1 scheduler design
+constraint, not a later optimisation.**
+
+The Odds API free tier is 500 requests/month account-wide: ~16 per day. That
+is affordable at slate level, because one request returns every game for a
+sport/region/market set. It is *not* affordable naively.
+
+The problem is what CLV means. A closing line is the price near first pitch,
+and MLB start times spread across roughly six hours. Sixteen evenly-spaced
+polls put ~90 minutes between them, so the last snapshot before a given game
+could be an hour and a half stale — and the final 30 minutes is exactly when
+lineup confirmations and steam land. A CLV series measured that way is not
+measuring the close; it is measuring a T−90min proxy and calling it the close.
+Every number this phase exists to produce would carry that bias, invisibly.
+
+So the poller must cluster requests around start times rather than spreading
+them evenly. MLB start times bunch into a handful of clusters per day
+(roughly 13:05, 19:05/19:10, 20:10, 22:10 ET), so a workable allocation is
+about half the daily budget fired just before those clusters and the rest
+spread thinly for line-movement history. Coarse early coverage is an
+acceptable loss; a stale close is not.
+
+Two consequences to design in from the start, not bolt on:
+
+- The scheduler must read the day's start times and derive its poll times
+  from them, rather than running on a fixed cron. A fixed cron cannot know
+  that today's slate is all afternoon games.
+- `ingest_runs.api_requests` already exists to make budget consumption
+  reconstructible from history. It needs to be populated from day one or the
+  budget is being managed blind.
+
+Until that scheduler exists, any CLV computed from automatically-polled data
+should be read as approximate. CLV from hand-entered prices (the current
+`snapshot add` path) is exact, because the timestamps are whatever was
+actually observed.
+
+---
+
+## OPEN: is The Odds API's player-props endpoint per-event?
+
+**Confirm before writing any Phase 4 prop code.**
+
+If props are quoted per-event rather than per-slate, then one request per
+game per poll — ~15 games — consumes the entire monthly budget in about two
+days. That makes props a pricing decision (paid tier, or a different
+provider) rather than an engineering one, and it should be settled before
+code exists that assumes otherwise.
+
+Do not infer the answer from the moneyline endpoint's behaviour; check the
+documentation and a real response.
 
 ---
 

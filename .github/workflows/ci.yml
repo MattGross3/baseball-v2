@@ -91,6 +91,13 @@ jobs:
       - name: Tests
         run: pytest -q
 
+      # Deselected locally (see addopts) because they bulk-load rows, so CI
+      # is the only place they run. An index silently going unused is
+      # invisible to every other test - the query still returns correct
+      # rows, just by reading the whole table.
+      - name: Query-plan tests
+        run: pytest -q -m performance
+
   # Secret scanning runs on every push and on the full history, not just the
   # diff: this repository is private today and may not always be, and a key
   # committed once stays in the history after it is deleted from HEAD.

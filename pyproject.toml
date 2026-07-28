@@ -48,6 +48,10 @@ asyncio_mode = "auto"
 # Async fixtures live for the whole session (one Postgres engine, one
 # schema creation) rather than being torn down per test.
 asyncio_default_fixture_loop_scope = "session"
+# Query-plan tests bulk-load 50k rows and are deselected locally so the
+# inner loop stays fast. CI runs them as their own job - they only guard
+# against a silent index regression if they actually run somewhere.
+addopts = "-m 'not performance'"
 markers = [
     "postgres: requires a live Postgres 16 (docker compose up -d postgres)",
     "performance: asserts on query plans; needs bulk data. Deselect with -m 'not performance'",

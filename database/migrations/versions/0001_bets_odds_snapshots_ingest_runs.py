@@ -1,65 +1,8 @@
 """bets odds_snapshots ingest_runs
 
-Phase 0 schema: persistence for the CLV measurement loop.
-
-Three things here are load-bearing and easy to undo by accident:
-
-1. `odds_snapshots` is APPEND-ONLY: no UPDATE, ever. But the same
-   observation written twice is not two observations, so the natural key
-   (game_pk, market, selection, book, line, captured_at) is UNIQUE and
-   writers use ON CONFLICT DO NOTHING - which inserts or does not, and
-   never rewrites a row. A retried ingest run is therefore idempotent
-   instead of pushing de-duplication onto every read forever.
-
-   NULLS NOT DISTINCT is essential, not decoration. Postgres treats NULLs
-   as distinct in a unique index by default, so without it every moneyline
-   row - where line IS NULL, the most common market - would collide with
-   nothing and duplicate freely. Requires Postgres 15+; we target 16.
-
-   This only works because `captured_at` is stamped from the owning ingest
-   run's started_at rather than now(). A retry writing a fresh now() would
-   land microseconds from the original, collide with nothing, and be stored
-   as a second observation of one real observation.
-
-2. `game_date` (DATE, venue-local) and `commence_time_utc` (TIMESTAMPTZ)
-   hold different facts and neither is derivable from the other. A 10:10pm
-   Pacific game is 05:10 UTC the NEXT day, so computing game_date as
-   commence_time_utc::date drops late West Coast games from any query keyed
-   on the slate date.
-
-3. The point-in-time lookup is served by TWO PARTIAL indexes split on
-   line-presence, not one index. Do not consolidate them.
-
-     ix_odds_snapshots_pit_no_line
-       (game_pk, market, selection, book, captured_at, id) WHERE line IS NULL
-     ix_odds_snapshots_pit_lined
-       (game_pk, market, selection, book, line, captured_at, id)
-                                                  WHERE line IS NOT NULL
-
-   A btree yields ordered output on a trailing column only when every
-   preceding column is bound by EQUALITY. `line IS NULL` is a NullTest, not
-   an equality operator, so it never forms an equivalence class with a
-   constant and the planner cannot drop the `line` pathkey - it reads every
-   matching row and sorts. At 400k rows a single index containing `line`
-   cost 289.99 against 8.47 for the ordered plan.
-
-   Dropping `line` entirely fixes the ordering but makes a lined lookup scan
-   every snapshot for that game/market/selection/book across ALL lines and
-   filter. Splitting gets both: the unlined index absorbs `line IS NULL`
-   into its predicate so it is not a column at all, and the lined index has
-   `line = $5` as a genuine equality that narrows the scan.
-
-   This depends on the query emitting `line IS NULL` or `line = $5` so the
-   planner can match a predicate. `IS NOT DISTINCT FROM` matches neither and
-   is not indexable at all. See betting/clv.py::find_closing_snapshot.
-
-There is intentionally no `games` table yet, so `game_pk` carries no foreign
-key - it is a bare indexed integer until a schedule ingest exists to own it.
-
-
 Revision ID: 0001
 Revises: 
-Create Date: 2026-07-27 16:07:33.426470
+Create Date: 2026-07-27 21:56:59.835145
 """
 from __future__ import annotations
 
@@ -123,8 +66,10 @@ def upgrade() -> None:
     sa.Column('api_requests', sa.Integer(), server_default=sa.text('0'), nullable=False),
     sa.Column('params', postgresql.JSONB(astext_type=sa.Text()), server_default=sa.text("'{}'::jsonb"), nullable=False),
     sa.Column('error', sa.Text(), nullable=True),
+    sa.Column('backend_pid', sa.Integer(), nullable=True),
     sa.CheckConstraint("(status = 'running') = (finished_at IS NULL)", name=op.f('ck_ingest_runs_finished_iff_done')),
     sa.CheckConstraint("status <> 'failed' OR error IS NOT NULL", name=op.f('ck_ingest_runs_failed_has_error')),
+    sa.CheckConstraint("status <> 'success' OR error IS NULL", name=op.f('ck_ingest_runs_success_has_no_error')),
     sa.CheckConstraint("status IN ('running','success','partial','failed')", name=op.f('ck_ingest_runs_status')),
     sa.CheckConstraint('rows_written >= 0 AND api_requests >= 0', name=op.f('ck_ingest_runs_counts_nonneg')),
     sa.PrimaryKeyConstraint('id', name=op.f('pk_ingest_runs'))

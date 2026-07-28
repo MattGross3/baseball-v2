@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Iterator
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -166,6 +167,70 @@ class TestOwnershipGuard:
         assert version[0] == "0001"
         assert columns is not None
         assert columns[0] > 0
+
+
+class TestDataLossGuard:
+    """A downgrade must not silently destroy observed prices.
+
+    The ownership guard protects against migrating somebody else's database.
+    From Phase 1 the catastrophic path is `alembic downgrade base` against
+    OUR OWN database holding a week of odds_snapshots - which the ownership
+    guard waves through, correctly, because those tables are ours.
+
+    Observed prices are the only thing here that cannot be re-fetched: a
+    game can be re-ingested and a model retrained, but the price a book
+    showed at a particular instant is gone once dropped.
+    """
+
+    def _seed_one_snapshot(self, scratch_url: str) -> None:
+        with psycopg.connect(_dsn(scratch_url, _SCRATCH_DB), autocommit=True) as conn:
+            conn.execute(
+                "INSERT INTO ingest_runs (source, run_kind, status, started_at,"
+                " finished_at) VALUES ('t','t','success', now(), now())"
+            )
+            conn.execute(
+                "INSERT INTO odds_snapshots (ingest_run_id, game_pk, game_date,"
+                " commence_time_utc, book, market, selection, line,"
+                " odds_american, captured_at) VALUES"
+                " (1, 776543, DATE '2026-07-27', now(), 'pinnacle',"
+                " 'moneyline', 'away', NULL, 130, now())"
+            )
+
+    def test_refuses_to_downgrade_a_populated_database(
+        self, alembic_config, scratch_url
+    ):
+        command.upgrade(alembic_config, "head")
+        self._seed_one_snapshot(scratch_url)
+
+        with pytest.raises(SystemExit) as exc:
+            command.downgrade(alembic_config, "base")
+
+        message = str(exc.value)
+        assert "REFUSING TO DOWNGRADE" in message
+        assert "1 observed price" in message
+        assert "allow_data_loss=1" in message
+        # Nothing was dropped.
+        assert {"bets", "odds_snapshots", "ingest_runs"} <= _tables(scratch_url)
+
+    def test_allows_a_downgrade_of_an_empty_database(self, alembic_config, scratch_url):
+        # No prices means nothing irreplaceable to lose.
+        command.upgrade(alembic_config, "head")
+        command.downgrade(alembic_config, "base")
+        assert _tables(scratch_url) <= {"alembic_version"}
+
+    def test_the_override_flag_permits_it(self, alembic_config, scratch_url):
+        command.upgrade(alembic_config, "head")
+        self._seed_one_snapshot(scratch_url)
+
+        alembic_config.cmd_opts = SimpleNamespace(x=["allow_data_loss=1"])
+        command.downgrade(alembic_config, "base")
+        assert _tables(scratch_url) <= {"alembic_version"}
+
+    def test_upgrades_are_never_blocked_by_it(self, alembic_config, scratch_url):
+        # The guard is about direction, not about the table being populated.
+        command.upgrade(alembic_config, "head")
+        self._seed_one_snapshot(scratch_url)
+        command.upgrade(alembic_config, "head")  # no-op, must not raise
 
 
 class TestModelMigrationParity:

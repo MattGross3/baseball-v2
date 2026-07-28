@@ -1,10 +1,8 @@
 """Provenance: every row written gets traced back to the run that wrote it.
 
-Used as a context manager so that a crash cannot leave a run unaccounted
-for. On the way out the run is marked `success` or `failed` with the
-exception text - a worker that dies mid-poll leaves evidence rather than
-silence, and a row still in `running` long after it started is how a hung
-process announces itself.
+Used as a context manager so a crash cannot leave a run unaccounted for. The
+run row is COMMITTED at creation, before any work happens, and that is
+load-bearing rather than incidental - see `ingest_run`.
 """
 
 from __future__ import annotations
@@ -16,14 +14,20 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import Any, cast
 
-from sqlalchemy import CursorResult, select, update
+from sqlalchemy import CursorResult, and_, case, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.enums import IngestStatus
 from database.models import IngestRun
 from database.utc import utcnow
 
-__all__ = ["STALE_RUN_AFTER", "ingest_run", "reap_stale_runs"]
+__all__ = [
+    "PID_REAP_GRACE",
+    "STALE_RUN_AFTER",
+    "ingest_run",
+    "reap_stale_runs",
+    "stale_runs",
+]
 
 log = logging.getLogger(__name__)
 
@@ -32,72 +36,104 @@ log = logging.getLogger(__name__)
 # exception, rather than the head.
 _MAX_ERROR_CHARS = 4000
 
-# Longer than any plausible ingest. A poll that has been "running" for an
-# hour is not slow, it is dead.
+# Fallback for rows with no backend_pid. Longer than any plausible ingest.
 STALE_RUN_AFTER = dt.timedelta(hours=1)
 
-REAPED_ERROR = "reaped: no heartbeat"
+# Minimum age before a run is reaped on pid evidence alone. See the note on
+# connection churn in `reap_stale_runs`.
+PID_REAP_GRACE = dt.timedelta(minutes=5)
 
-# Reaping is a start-up concern, not a per-write one. This makes it happen
-# once per process rather than on every ingest_run() call.
-_reaped_this_process = False
+REAPED_ERROR_NO_HEARTBEAT = "reaped: no heartbeat"
+REAPED_ERROR_BACKEND_GONE = "reaped: backend gone"
 
 
 async def reap_stale_runs(
-    session: AsyncSession, *, older_than: dt.timedelta = STALE_RUN_AFTER
+    session: AsyncSession,
+    *,
+    older_than: dt.timedelta = STALE_RUN_AFTER,
+    pid_grace: dt.timedelta = PID_REAP_GRACE,
 ) -> int:
     """Mark abandoned `running` rows as failed. Returns how many were reaped.
 
-    A crashed worker leaves its run in `running` forever. The partial index
-    ix_ingest_runs_running exists to find those rows, but an index nothing
-    queries is just a slower INSERT - so something has to actually look.
+    Two mechanisms, in order of preference:
 
-    Without this, "the odds poller has been broken for six days" is
-    invisible: the last row still says `running`, which reads as healthy at
-    a glance, and there is no failed run and no error message anywhere to
-    contradict it. With it, the same situation surfaces as a failed run with
-    a reason.
+    1. **Backend liveness.** A run records the Postgres backend pid that
+       created it. If no such pid appears in pg_stat_activity, the
+       connection is gone, which means the process holding it is gone. This
+       is evidence rather than inference: a wall-clock timeout can only
+       guess, and guesses wrong in both directions - it reaps a slow but
+       healthy backfill, and waits an hour on a process that died instantly.
+
+    2. **Age**, for rows with no backend_pid: written before this column
+       existed, or by some future writer that does not hold a connection for
+       the run's duration.
+
+    ASSUMPTIONS, because both are violable:
+
+    - *A run holds its connection for its duration.* True under
+      `session_scope()`, where the session keeps working on the same pooled
+      connection. If a writer commits, releases the connection, and later
+      picks up a different one, the recorded pid can go stale while the run
+      is alive. `pid_grace` is the guard: a run is never reaped on pid
+      evidence until it is at least that old, so ordinary pool churn during
+      start-up cannot produce a false positive.
+
+    - *Pids are per-server.* A run started against the same database from a
+      DIFFERENT host has a pid meaningful only on that host, and this query
+      would judge it by the wrong machine's process table. Correct for
+      single-node deployment, wrong the moment there are two. When that
+      happens, add a host column and compare on (host, pid), or move to an
+      advisory lock held for the run's duration.
 
     Deliberately does NOT touch `partial` or `failed` runs - only `running`
-    ones that have outlived any plausible execution.
+    ones.
     """
-    cutoff = utcnow() - older_than
+    now = utcnow()
+
+    # The only part that has to be raw: pg_stat_activity is a system view
+    # with no ORM mapping, and correlating it to ingest_runs.backend_pid is
+    # the whole point of the check.
+    backend_is_gone = text(
+        "NOT EXISTS (SELECT 1 FROM pg_stat_activity a "
+        "WHERE a.pid = ingest_runs.backend_pid)"
+    )
+
     result = await session.execute(
         update(IngestRun)
         .where(
             IngestRun.status == IngestStatus.RUNNING.value,
-            IngestRun.started_at < cutoff,
+            or_(
+                and_(
+                    IngestRun.backend_pid.is_not(None),
+                    IngestRun.started_at < now - pid_grace,
+                    backend_is_gone,
+                ),
+                and_(
+                    IngestRun.backend_pid.is_(None),
+                    IngestRun.started_at < now - older_than,
+                ),
+            ),
         )
         .values(
             status=IngestStatus.FAILED.value,
-            finished_at=utcnow(),
-            error=REAPED_ERROR,
+            finished_at=now,
+            # Say which mechanism fired. "backend gone" is evidence;
+            # "no heartbeat" is only inference, and the distinction matters
+            # when reading back why a run was marked failed.
+            error=case(
+                (IngestRun.backend_pid.is_(None), REAPED_ERROR_NO_HEARTBEAT),
+                else_=REAPED_ERROR_BACKEND_GONE,
+            ),
         )
     )
-    # `rowcount` is on CursorResult, which is what an UPDATE returns; the
-    # generic Result type does not declare it.
     reaped = cast("CursorResult[Any]", result).rowcount or 0
     if reaped:
         log.warning(
-            "Reaped %d ingest run(s) still marked running after %s - a worker "
-            "died without recording its failure.",
+            "Reaped %d ingest run(s) still marked running - a worker died "
+            "without recording its failure.",
             reaped,
-            older_than,
         )
     return reaped
-
-
-async def reap_stale_runs_once(session: AsyncSession) -> int:
-    """Reap on first call in this process, then no-op.
-
-    Keeps the guarantee that every writer reaps at start-up without paying
-    an UPDATE on every single ingest_run().
-    """
-    global _reaped_this_process
-    if _reaped_this_process:
-        return 0
-    _reaped_this_process = True
-    return await reap_stale_runs(session)
 
 
 async def stale_runs(
@@ -121,6 +157,15 @@ async def stale_runs(
     )
 
 
+async def _backend_pid(session: AsyncSession) -> int | None:
+    """The pid of the Postgres backend this session is currently using."""
+    try:
+        return (await session.execute(text("SELECT pg_backend_pid()"))).scalar_one()
+    except Exception:  # pragma: no cover - non-Postgres or a dead connection
+        log.debug("could not read pg_backend_pid()", exc_info=True)
+        return None
+
+
 @asynccontextmanager
 async def ingest_run(
     session: AsyncSession,
@@ -132,48 +177,55 @@ async def ingest_run(
     """Open an `ingest_runs` row, yield it, and close it out.
 
     The caller is expected to set `rows_written` (and `api_requests`, where
-    an external API was involved) on the yielded object before the block
-    exits.
-    """
-    # Clear out anything a previous process abandoned. Once per process, so
-    # this is a start-up concern rather than a cost on every write.
-    await reap_stale_runs_once(session)
+    an external API was involved) before the block exits.
 
+    THE RUN ROW IS COMMITTED BEFORE ANY WORK HAPPENS. This looks like a
+    transactional wart and is the opposite: an earlier version only flushed,
+    which meant the row was invisible to every other connection for the
+    run's whole lifetime and disappeared entirely if the process died. The
+    reaper could therefore never see a crashed or hung run - the only state
+    it exists to clean up was the one state it could not observe. Committing
+    first is what makes a run externally visible while it is happening, and
+    what makes it survive the crash that leaves it stranded.
+
+    The work itself runs in the transaction that follows, so a failure still
+    rolls back the rows written - just not the record that the attempt
+    happened, which is the part worth keeping.
+    """
     run = IngestRun(
         source=source,
         run_kind=run_kind,
         status=IngestStatus.RUNNING.value,
         started_at=utcnow(),
         params=params or {},
+        backend_pid=await _backend_pid(session),
     )
     session.add(run)
-    # Flush rather than commit: the run's id is needed immediately as a
-    # foreign key for the rows about to be written, but the run and its rows
-    # must land in the same transaction so a failure rolls back both.
-    await session.flush()
+    await session.commit()
+
+    # Clear out anything a previous process abandoned. After the commit
+    # above, so this run is never a candidate for its own reap.
+    await reap_stale_runs(session)
+    await session.commit()
 
     try:
         yield run
     except Exception as exc:
-        # The transaction is poisoned at this point, so the failure cannot be
-        # recorded on this session. Roll back, then write the failure row on
-        # a fresh transaction - otherwise the crash that most needs recording
-        # is the one that leaves no trace.
+        # The transaction is poisoned, so roll back the work first, then
+        # record the failure on the run row that already exists. No second
+        # row: an attempt happened once, and it failed.
         await session.rollback()
         detail = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        failed = IngestRun(
-            source=source,
-            run_kind=run_kind,
-            status=IngestStatus.FAILED.value,
-            started_at=run.started_at,
-            finished_at=utcnow(),
-            params=params or {},
-            error=detail[-_MAX_ERROR_CHARS:],
-        )
-        session.add(failed)
+        run.status = IngestStatus.FAILED.value
+        run.finished_at = utcnow()
+        run.error = detail[-_MAX_ERROR_CHARS:]
         await session.commit()
         raise
     else:
         run.status = IngestStatus.SUCCESS.value
         run.finished_at = utcnow()
+        # Clear any error inherited from a reap that fired while this run was
+        # still working. ck_ingest_runs_success_has_no_error rejects the row
+        # otherwise, so this is enforced rather than merely intended.
+        run.error = None
         await session.flush()
