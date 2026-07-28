@@ -39,7 +39,7 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools]
 # `database.migrations` is deliberately absent: Alembic locates it by
 # filesystem path via `script_location`, never by import.
-packages = ["betting", "database"]
+packages = ["betting", "database", "ingestion"]
 py-modules = ["config"]
 
 [tool.pytest.ini_options]

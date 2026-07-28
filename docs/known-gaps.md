@@ -78,6 +78,41 @@ recomputation is possible.
 
 ---
 
+## `backend_pid` is captured on the wrong connection
+
+**Known and deliberately not fixed yet. The fix is one line; the risk is one
+wrong status on an audit row.**
+
+`ingest_run()` reads `pg_backend_pid()` *before* its first commit. Committing
+returns the connection to the pool, so the pid recorded belongs to the setup
+connection rather than the one that goes on to do the work.
+
+Under `QueuePool` the same connection usually comes back, which is why the
+tests pass — but that is luck, not a guarantee. `PID_REAP_GRACE` covers
+start-up churn only; it does nothing for a long run that gets handed a
+different connection. The Phase 2 Statcast backfill is exactly that shape: a
+run long enough for the pool to have moved on, and long enough for the reaper
+to look at it.
+
+Symptom if it bites: a live run marked `failed` with `reaped: backend gone`.
+It cannot corrupt a price or a bet — `ingest_runs` is an audit table, and the
+work's own transaction is unaffected — which is why this is recorded rather
+than rushed.
+
+The fix, when it matters:
+
+```python
+# in ingest_run(), after the run row and the reap have both committed
+run.backend_pid = await _backend_pid(session)
+await session.commit()
+```
+
+Re-reading after the commits binds the pid to the connection the work will
+actually run on. Do it then rather than now, so the change lands with a test
+that holds a connection across a commit and asserts the pid still matches.
+
+---
+
 ## The reaper judges liveness by pid, which is single-node only
 
 `reap_stale_runs` asks `pg_stat_activity` whether the backend that opened a
@@ -141,9 +176,14 @@ would need thought about whether it helps or hurts them.
 **Decided: weight the schedule toward first pitch. Phase 1 scheduler design
 constraint, not a later optimisation.**
 
-The Odds API free tier is 500 requests/month account-wide: ~16 per day. That
-is affordable at slate level, because one request returns every game for a
-sport/region/market set. It is *not* affordable naively.
+The Odds API free tier is 500 credits/month account-wide, and **a credit is
+charged per market per region, not per request** — measured, not assumed:
+a single-market call returned `x-requests-last: 1`. Polling h2h + spreads +
+totals for the US region therefore costs **3 credits per poll**.
+
+That is ~166 polls a month, or **5.5 per day** — not the ~16 an earlier
+version of this note assumed. Three times tighter. One request still returns
+every game in the slate, so the cost scales with markets, not with games.
 
 The problem is what CLV means. A closing line is the price near first pitch,
 and MLB start times spread across roughly six hours. Sixteen evenly-spaced
@@ -153,12 +193,20 @@ lineup confirmations and steam land. A CLV series measured that way is not
 measuring the close; it is measuring a T−90min proxy and calling it the close.
 Every number this phase exists to produce would carry that bias, invisibly.
 
-So the poller must cluster requests around start times rather than spreading
-them evenly. MLB start times bunch into a handful of clusters per day
-(roughly 13:05, 19:05/19:10, 20:10, 22:10 ET), so a workable allocation is
-about half the daily budget fired just before those clusters and the rest
-spread thinly for line-movement history. Coarse early coverage is an
-acceptable loss; a stale close is not.
+At 5.5 polls a day, clustering is not an optimisation — it is the only way
+the number means anything. MLB start times bunch into a handful of clusters
+(roughly 13:05, 19:05/19:10, 20:10, 22:10 ET). Spending nearly the whole
+daily budget just before those clusters, and accepting almost no early
+coverage, is the trade: line-movement history is nice to have, a close is
+the thing being measured.
+
+Two levers if 5.5/day proves too tight:
+- **Drop to h2h only** (1 credit/poll → ~16 polls/day). Moneyline CLV is the
+  Phase 0 metric; spreads and totals are not yet used by anything.
+- Pay for a higher tier.
+
+Prefer the first until there is a reason not to. It is a configuration
+change, and it triples the resolution of the only market currently measured.
 
 Two consequences to design in from the start, not bolt on:
 
@@ -173,6 +221,31 @@ Until that scheduler exists, any CLV computed from automatically-polled data
 should be read as approximate. CLV from hand-entered prices (the current
 `snapshot add` path) is exact, because the timestamps are whatever was
 actually observed.
+
+---
+
+## A twice-postponed game loses its intermediate history
+
+`games.rescheduled_from_date` holds one date. A game postponed twice keeps
+only the most recent origin; the middle hop is lost.
+
+About 2% of games are postponed, so a double postponement is rare enough to
+accept. Deliberately not built for. If it ever matters, the fix is a
+separate `game_reschedules` table, not a second column.
+
+There is no `rescheduled_as` column, and that is not an omission: StatsAPI
+REUSES the gamePk across a postponement (pk 778431 was postponed 2025-04-06
+and played 2025-08-09 under the same pk), so there is no successor game to
+point at. A permanently-NULL column would be a claim about the data that is
+not true, and the next reader would assume something populates it.
+
+The market-episode distinction is already carried without extra structure:
+that game accumulates snapshots under one pk across two episodes, but each
+snapshot stores `game_date` as reported at capture, so April rows say
+2025-04-06 and August rows say 2025-08-09. Separable by a plain GROUP BY.
+That is decision D6 (denormalise rather than normalise) paying off in a way
+that was not anticipated when it was made — so do not "simplify" the
+denormalised copy away later.
 
 ---
 
