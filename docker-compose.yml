@@ -10,13 +10,21 @@ services:
       POSTGRES_PASSWORD: baseball
       POSTGRES_DB: baseball
     ports:
-      # 5433 on the host, NOT 5432. A native PostgreSQL 18 install already
-      # listens on 5432 and holds the v1 project's live database (games,
-      # predictions, model_registry, ...). Binding there too is silently
-      # ambiguous - both processes accept the bind, and host connections
-      # reach whichever won the race - so this project would intermittently
-      # run its migrations against v1's real data. Keep them separated.
-      - "5433:5432"
+      # BOUND TO LOOPBACK. The 127.0.0.1 prefix is not decoration.
+      #
+      # Docker writes published ports into iptables in the DOCKER chain,
+      # which is evaluated BEFORE ufw's rules. A bare "5433:5432" is
+      # therefore reachable from the internet even while `ufw status` shows
+      # the port denied - the firewall is telling the truth about its own
+      # rules and is simply not in the path. Binding to 127.0.0.1 means
+      # Docker never publishes on the public interface at all, so there is
+      # nothing for ufw to have to block.
+      #
+      # 5433 rather than 5432 because a native PostgreSQL install on the
+      # development machine owns 5432 and holds another project's live
+      # database. Both processes accept the bind and host connections reach
+      # whichever won the race, so migrations could land on the wrong data.
+      - "127.0.0.1:5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:

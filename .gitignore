@@ -13,6 +13,18 @@ dist/
 .idea/
 .vscode/
 
+# Local/private artifacts that should never be committed.
+brah/
+brah.pub
+
 # Raw API captures. Kept locally as the recovery path for parser bugs, but
 # not committed: they grow without bound and contain no logic.
 raw/
+
+# Credentials. Never commit a key - a private key in git history stays
+# exposed after it is deleted from HEAD, and the only real fix is rotation.
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.ssh/
