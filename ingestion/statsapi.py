@@ -99,18 +99,28 @@ def fetch_schedule(
     share the endpoint and would otherwise land in `games` as though they
     were real.
 
-    ONE REQUEST PER DAY, AND NO `hydrate`. Both are forced, not preference.
-    MLB throttles the expensive query forms by source address: from a
-    datacenter IP, `startDate`/`endDate` ranges and any `hydrate` parameter
-    return HTTP 406 Not Acceptable, while a bare single-date request returns
-    200. The identical range request succeeds from a residential connection,
-    so this is not an API change and cannot be found by testing locally -
-    the droplet hit it on its first real run.
+    THE QUERY IS DELIBERATELY MINIMAL: `sportId` and `date`, nothing else.
+    Not preference - anything richer is refused from a datacenter address.
 
-    Nothing is lost by dropping `hydrate`: the base payload already carries
-    every field `game_values()` reads - gamePk, officialDate, gameDate, both
-    team ids, venue id, status, and the reschedule fields. The hydrate only
-    added detail we never used.
+    MLB appears to gate the more expensive query forms by source IP. Measured
+    from the droplet, every one of these returns HTTP 406 Not Acceptable
+    while a bare single-date request returns 200:
+
+        startDate=..&endDate=..        406   (date range)
+        date=..&gameType=R             406   (server-side filtering)
+        date=..&hydrate=team,venue     406   (hydration)
+
+    All three still return 200 from a residential connection, so this is not
+    an API change and cannot be reproduced locally - the droplet hit it on
+    its first real run, and the poller then wrote zero rows because `games`
+    was empty.
+
+    So: one request per day, and both the game-type filter and the fields
+    hydrate would have added are handled here instead. Nothing is lost. The
+    base payload already carries every field `game_values()` reads - gamePk,
+    officialDate, gameDate, both team ids, venue id, status and the
+    reschedule fields - and `gameType` is on each game, so filtering to
+    regular-season games client-side gives the identical result.
 
     `pause` is politeness, not rate-limit avoidance: the season backfill is
     ~850 sequential requests against a free, unmetered API.
@@ -123,7 +133,7 @@ def fetch_schedule(
     day, last = start, end or start
 
     while day <= last:
-        params = {"sportId": "1", "date": day.isoformat(), "gameType": game_type}
+        params = {"sportId": "1", "date": day.isoformat()}
         url = f"{STATSAPI_BASE}/schedule?{urllib.parse.urlencode(params)}"
         # Identify ourselves rather than sending Python-urllib/x.y.
         request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -131,7 +141,14 @@ def fetch_schedule(
             payload = json.load(response)
 
         rows.extend(
-            game for date in payload.get("dates", []) for game in date.get("games", [])
+            game
+            for date in payload.get("dates", [])
+            for game in date.get("games", [])
+            # Filtered here rather than by the server: gameType=R is one of
+            # the parameters that draws a 406. Spring training and
+            # exhibitions share this endpoint and would otherwise land in
+            # `games` as though they were real.
+            if game.get("gameType") == game_type
         )
         day += dt.timedelta(days=1)
         if day <= last and pause:
