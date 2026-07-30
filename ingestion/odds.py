@@ -379,7 +379,7 @@ async def budget_gate(
     )
 
 
-def ping_healthcheck() -> None:
+def ping_healthcheck(env_var: str = "HEALTHCHECK_URL") -> None:
     """Best-effort liveness ping. Never fails the run.
 
     A monitoring call that can break the thing it monitors is worse than no
@@ -387,7 +387,7 @@ def ping_healthcheck() -> None:
     rows by the time this runs, and an unreachable healthcheck host must
     not turn a successful capture into a failed one.
     """
-    url = os.environ.get("HEALTHCHECK_URL", "").strip()
+    url = os.environ.get(env_var, "").strip()
     if not url:
         return
     with contextlib.suppress(Exception), urllib.request.urlopen(url, timeout=5):

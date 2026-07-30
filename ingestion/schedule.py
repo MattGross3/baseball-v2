@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from database.ingest_run import ingest_run
 from database.models import Game
+from ingestion.odds import ping_healthcheck
 from ingestion.statsapi import (
     GameRow,
     fetch_schedule,
@@ -98,5 +99,10 @@ async def upsert_schedule(
 
         run.rows_written = written
         log.info("schedule %s..%s: %d game(s)", start, end or start, written)
+
+    # Its own check, separate from the poller's: the two jobs fail
+    # independently and for different reasons, and one alert covering both
+    # would let a broken schedule hide behind a healthy poll.
+    ping_healthcheck("HEALTHCHECK_SCHEDULE_URL")
 
     return written

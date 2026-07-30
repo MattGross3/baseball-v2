@@ -266,6 +266,40 @@ rather than a fixed roster.
 
 ---
 
+## Backups are local only - one droplet, no off-site copy
+
+**Accepted, deliberately, and the risk is asymmetric.**
+
+Nightly `pg_dump | gzip` runs at 03:15 UTC into /home/matt/backups, pruned to
+14 days, verified with `gzip -t` before pruning so a broken dump never causes
+a good one to be deleted. It has been restore-tested: every table's row count
+matched production exactly.
+
+But all of it lives on the same droplet as the database. A lost volume, a
+destroyed droplet, or a corrupted filesystem takes the backups with the thing
+they back up.
+
+What is actually at stake is not symmetric:
+
+- `games` is re-fetchable from StatsAPI at any time. Free.
+- `bets` are hand-entered and few.
+- **`raw/` captures and `odds_snapshots` cannot be re-fetched at any price.**
+  A price a book showed at 22:55 on a Tuesday exists nowhere else once it is
+  gone; historical odds are a paid add-on and do not go back at per-minute
+  resolution.
+
+So the one irreplaceable thing is the one with no off-site copy. Closing this
+is `rclone` to B2 or S3 - the script and cron slots are trivial, it needs
+only credentials:
+
+    rclone config                 # interactive, on the droplet
+    30 3 * * *  rclone sync /home/matt/backups     b2:<bucket>/backups
+    35 3 * * *  rclone sync /home/matt/baseball-v2/raw b2:<bucket>/raw
+
+Until then, treat the price history as single-copy.
+
+---
+
 ## StatsAPI serves the droplet only a narrow current window
 
 **Operational, discovered in production, works around itself.**
