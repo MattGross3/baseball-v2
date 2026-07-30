@@ -266,6 +266,40 @@ rather than a fixed roster.
 
 ---
 
+## StatsAPI serves the droplet only a narrow current window
+
+**Operational, discovered in production, works around itself.**
+
+MLB StatsAPI gates requests by source address. Measured from the droplet
+(DigitalOcean, 104.248.124.37) versus a residential connection:
+
+| request | droplet | residential |
+|---|---|---|
+| `date=<today±1>` | 200 | 200 |
+| `date=<any historical date>` | **406** | 200 |
+| `startDate=..&endDate=..` | **406** | 200 |
+| `date=..&gameType=R` | **406** | 200 |
+| `date=..&hydrate=team,venue` | **406** | 200 |
+
+Not rate limiting: it is stable across pauses and reproducible per-parameter.
+The 406 body is a bare Spring error with no explanation.
+
+Consequences, both already handled:
+
+- `fetch_schedule` issues **one request per day with only `sportId` and
+  `date`**, and filters `gameType` client-side. Nothing is lost - the base
+  payload already carries every field `game_values()` reads.
+- **The season backfill cannot run on the droplet.** It runs from a
+  residential connection, writing into the droplet's Postgres over an SSH
+  tunnel (`ssh -N -L 15433:localhost:5433 baseball`) - which is possible
+  precisely because Postgres is bound to loopback rather than exposed.
+
+The daily cron schedule job only needs today ±1, so it is unaffected. But if
+a future job needs historical schedule data on the box, it will hit this,
+and the answer is the tunnel rather than a workaround in the client.
+
+---
+
 ## A twice-postponed game loses its intermediate history
 
 `games.rescheduled_from_date` holds one date. A game postponed twice keeps

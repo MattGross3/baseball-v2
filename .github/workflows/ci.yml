@@ -45,6 +45,14 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.13 is what development runs (.python-version). 3.12 is what
+        # PRODUCTION runs - Ubuntu 24.04's native interpreter on the droplet.
+        # Testing only 3.13 would mean CI never exercises the version the
+        # code actually runs on, and requires-python is ">=3.12".
+        python-version: ["3.12", "3.13"]
     services:
       postgres:
         # Must match the version in docker-compose.yml. The schema relies on
@@ -68,7 +76,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version-file: .python-version
+          python-version: ${{ matrix.python-version }}
           cache: pip
       - run: pip install -e ".[dev]"
 
