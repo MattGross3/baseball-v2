@@ -83,3 +83,26 @@ SELECT p.game_date                                        AS day,
   FROM played p
   LEFT JOIN near_close n ON n.game_pk = p.game_pk
  GROUP BY 1 ORDER BY 1 DESC;
+
+\echo ''
+\echo '== unresolved events, last 14 days =='
+-- The number that says whether team-name or start-time drift is quietly
+-- eating games. An unresolved event writes no wrong price - it is skipped
+-- and named - so nothing else in this report would show it. A rising count
+-- means the crosswalk or the schedule window needs attention.
+SELECT count(*) FILTER (WHERE params ? 'unresolved')          AS runs_with_unresolved,
+       count(*)                                               AS runs_total,
+       coalesce(sum(jsonb_array_length(params->'unresolved')), 0) AS events_skipped
+  FROM ingest_runs
+ WHERE started_at > now() - interval '14 days'
+   AND run_kind IN ('odds_poll', 'odds_replay');
+
+\echo ''
+\echo '-- most recent unresolved examples --'
+SELECT r.started_at, r.source, e AS unresolved_event
+  FROM ingest_runs r
+ CROSS JOIN LATERAL jsonb_array_elements_text(r.params->'unresolved') AS e
+ WHERE r.params ? 'unresolved'
+   AND r.started_at > now() - interval '14 days'
+ ORDER BY r.started_at DESC
+ LIMIT 10;

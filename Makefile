@@ -105,8 +105,12 @@ replay:
 # psql inside the container, so no local client is needed. The only
 # interface for now: no dashboard.
 
+# `docker compose exec`, not `docker exec` with a hard-coded container name:
+# the name is derived from the directory, so it is baseballv2-postgres-1
+# locally and baseball-v2-postgres-1 on the droplet. The service name is the
+# same everywhere.
 status:
-	@docker exec -i baseballv2-postgres-1 psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/status.sql
+	@docker compose exec -T postgres psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/status.sql
 
 clv:
-	@docker exec -i baseballv2-postgres-1 psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/clv.sql
+	@docker compose exec -T postgres psql -U baseball -d baseball -q 		-v ON_ERROR_STOP=1 -f - < sql/clv.sql
