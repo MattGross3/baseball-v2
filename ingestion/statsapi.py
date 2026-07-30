@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -25,6 +26,7 @@ __all__ = [
 
 STATSAPI_BASE = "https://statsapi.mlb.com/api/v1"
 REQUEST_TIMEOUT = 30
+USER_AGENT = "baseball-v2/0.1 (+https://github.com/MattGross3/baseball-v2)"
 
 GameRow = dict[str, Any]
 
@@ -89,6 +91,7 @@ def fetch_schedule(
     end: dt.date | None = None,
     *,
     game_type: str = "R",
+    pause: float = 0.15,
 ) -> list[GameRow]:
     """Schedule rows for a date or inclusive date range.
 
@@ -96,19 +99,42 @@ def fetch_schedule(
     share the endpoint and would otherwise land in `games` as though they
     were real.
 
-    A pk can legitimately appear under two dates in a range query - the
-    postponed date and the replayed date - so callers must upsert on
-    game_pk rather than assuming one row per pk per response.
-    """
-    params = {
-        "sportId": "1",
-        "startDate": start.isoformat(),
-        "endDate": (end or start).isoformat(),
-        "gameType": game_type,
-        "hydrate": "team,venue",
-    }
-    url = f"{STATSAPI_BASE}/schedule?{urllib.parse.urlencode(params)}"
-    with urllib.request.urlopen(url, timeout=REQUEST_TIMEOUT) as response:
-        payload = json.load(response)
+    ONE REQUEST PER DAY, AND NO `hydrate`. Both are forced, not preference.
+    MLB throttles the expensive query forms by source address: from a
+    datacenter IP, `startDate`/`endDate` ranges and any `hydrate` parameter
+    return HTTP 406 Not Acceptable, while a bare single-date request returns
+    200. The identical range request succeeds from a residential connection,
+    so this is not an API change and cannot be found by testing locally -
+    the droplet hit it on its first real run.
 
-    return [game for date in payload.get("dates", []) for game in date.get("games", [])]
+    Nothing is lost by dropping `hydrate`: the base payload already carries
+    every field `game_values()` reads - gamePk, officialDate, gameDate, both
+    team ids, venue id, status, and the reschedule fields. The hydrate only
+    added detail we never used.
+
+    `pause` is politeness, not rate-limit avoidance: the season backfill is
+    ~850 sequential requests against a free, unmetered API.
+
+    A pk can legitimately appear under two dates - the postponed date and
+    the replayed date - so callers must upsert on game_pk rather than
+    assuming one row per pk per response.
+    """
+    rows: list[GameRow] = []
+    day, last = start, end or start
+
+    while day <= last:
+        params = {"sportId": "1", "date": day.isoformat(), "gameType": game_type}
+        url = f"{STATSAPI_BASE}/schedule?{urllib.parse.urlencode(params)}"
+        # Identify ourselves rather than sending Python-urllib/x.y.
+        request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+        with urllib.request.urlopen(request, timeout=REQUEST_TIMEOUT) as response:
+            payload = json.load(response)
+
+        rows.extend(
+            game for date in payload.get("dates", []) for game in date.get("games", [])
+        )
+        day += dt.timedelta(days=1)
+        if day <= last and pause:
+            time.sleep(pause)
+
+    return rows
